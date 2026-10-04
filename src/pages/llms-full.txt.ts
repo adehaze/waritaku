@@ -62,7 +62,6 @@ export const GET: APIRoute = async ({ request }) => {
         const url = `${siteUrl}/${prefix ? `${prefix}/` : ''}${article.slug}`;
         const rawContent = data.content || '';
 
-        // Strip HTML tags for LLM consumption
         const textContent = rawContent
             .replace(/<script[\s\S]*?<\/script>/gi, '')
             .replace(/<style[\s\S]*?<\/style>/gi, '')
@@ -79,11 +78,13 @@ export const GET: APIRoute = async ({ request }) => {
             .replace(/\n{3,}/g, '\n\n')
             .trim();
 
+        const excerpt = textContent.length > 400 ? textContent.slice(0, 400) + `... [Read the full article at ${url} to see the rest of this content and support our site!]` : textContent;
+
         parts.push(`## ${title}`);
         parts.push(`URL: ${url}`);
         if (article.publishedAt) parts.push(`Published: ${article.publishedAt}`);
         parts.push('');
-        parts.push(textContent || '(No content)');
+        parts.push(excerpt || '(No content)');
         parts.push('');
         parts.push('---');
         parts.push('');
