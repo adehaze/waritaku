@@ -141,22 +141,28 @@ if (env && (env as any).DB) {
             const candidateIds = Array.from(new Set(etRows.map((r: any) => r.entryId)));
             if (candidateIds.length === 0) return [];
 
+            // Sort descending (highest ID = newest) before chunking
+            candidateIds.sort((a: number, b: number) => b - a);
+
             // Step 3: Verify by PK only — pure id IN (chunk), forces SQLite to use PK index.
-            // collection_id + status are NOT added here because combining them with IN() causes
-            // the query planner to choose a composite index scan (~150 rows/call) instead of
-            // pure PK lookups (1 row/call). We filter collection + status in JS below.
             const D1_CHUNK = 50;
             let confirmed: { id: number, collectionId: number, status: string }[] = [];
+            const contentColIdSet = new Set(contentColIds);
+            
             for (let i = 0; i < candidateIds.length; i += D1_CHUNK) {
                 const chunk = candidateIds.slice(i, i + D1_CHUNK);
                 const rows = await db.select({ id: entries.id, collectionId: entries.collectionId, status: entries.status })
                     .from(entries)
                     .where(inArray(entries.id, chunk));
-                confirmed = confirmed.concat(rows);
+                    
+                const valid = rows.filter((r: any) => r.status === 'published' && contentColIdSet.has(r.collectionId));
+                confirmed = confirmed.concat(valid);
+                
+                if (confirmed.length >= offset + limit) {
+                    break; // Stop fetching chunks once we have enough to fulfill offset+limit!
+                }
             }
-            // JS filter: keep only published entries in content collections
-            const contentColIdSet = new Set(contentColIds);
-            confirmed = confirmed.filter((r: any) => r.status === 'published' && contentColIdSet.has(r.collectionId));
+            
             confirmed.sort((a: any, b: any) => b.id - a.id);
             entryIds = confirmed.slice(offset, offset + limit).map((r: any) => r.id);
 
