@@ -6,6 +6,23 @@ function safeJsonParse<T>(json: string | null | undefined, fallback: T): T {
     try { return JSON.parse(json); } catch { return fallback; }
 }
 
+// Shared edge-cached read of the collections table (10 min TTL).
+export async function getAllCollectionsCached(db: any): Promise<any[]> {
+    const KEY = 'https://waritaku.internal/cache/all_collections';
+    let list: any[] = [];
+    const hit = (typeof caches !== 'undefined') ? await caches.default.match(new Request(KEY)) : null;
+    if (hit) { try { list = await hit.json(); } catch {} }
+    if (list.length === 0) {
+        list = await db.select().from(collections);
+        if (typeof caches !== 'undefined' && list.length > 0) {
+            caches.default.put(new Request(KEY), new Response(JSON.stringify(list), {
+                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' }
+            })).catch(() => {});
+        }
+    }
+    return list;
+}
+
 // Batched version of getCanonicalUrl — no JOINs anywhere.
 // All three lookups (entry_terms, terms, taxonomies) are separate PK queries
 // joined in JS. This avoids the SQLite planner choosing a JOIN full-scan over
@@ -40,8 +57,13 @@ export async function getCanonicalUrls(
     }
     const taxById = new Map(allTaxonomies.map((t: any) => [t.id, t]));
 
-    // ── Step B: Build collections map from passed-in cache (zero D1) ──────────
-    const collectionById = new Map((allCollections || []).map((c: any) => [c.id, c]));
+    // ── Step B: Build collections map. If the caller did not pass collections,
+    // load them from the CF edge cache (D1 only on a cold cache). This keeps
+    // taxonomy priority (collections.supports) correct for every caller.
+    const collectionList = (allCollections && allCollections.length > 0)
+        ? allCollections
+        : await getAllCollectionsCached(db);
+    const collectionById = new Map(collectionList.map((c: any) => [c.id, c]));
 
     // ── Process entryIds in chunks of 50 ─────────────────────────────────────
     const D1_SAFE_CHUNK = 50;
