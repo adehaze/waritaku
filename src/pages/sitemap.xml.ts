@@ -4,8 +4,9 @@ import { eq, and, inArray } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 
 import { getDb } from '../lib/db';
+import { serveStoredResponse } from '../lib/stored-response';
 
-export const GET: APIRoute = async ({ request }) => {
+const build: APIRoute = async ({ request }) => {
     
     // Fallback if env is missing during build time
     if (!env || !env.DB) {
@@ -72,3 +73,6 @@ export const GET: APIRoute = async ({ request }) => {
         },
     });
 };
+
+export const GET: APIRoute = async (ctx) =>
+    serveStoredResponse(env, 'sitemap-index.xml', 21600, 'application/xml; charset=utf-8', () => build(ctx), (ctx.locals as any)?.cfContext);
