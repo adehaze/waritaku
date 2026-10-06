@@ -3,8 +3,9 @@ import { terms, taxonomies, settings } from '../db/schema';
 import { eq, inArray, and, sql } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
+import { serveStoredResponse } from '../lib/stored-response';
 
-export const GET: APIRoute = async ({ request }) => {
+const build: APIRoute = async ({ request }) => {
     if (!env || !env.DB) {
         return new Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>', { 
             headers: { 'Content-Type': 'application/xml; charset=utf-8' }
@@ -69,3 +70,6 @@ export const GET: APIRoute = async ({ request }) => {
         },
     });
 };
+
+export const GET: APIRoute = async (ctx) =>
+    serveStoredResponse(env, 'sitemap-terms.xml', 21600, 'application/xml; charset=utf-8', () => build(ctx), (ctx.locals as any)?.cfContext);
