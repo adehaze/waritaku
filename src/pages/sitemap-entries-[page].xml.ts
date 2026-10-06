@@ -4,32 +4,12 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
 import { getCanonicalUrls } from '../lib/queries';
+import { serveStoredResponse } from '../lib/stored-response';
 
-// Edge-cache the whole sitemap page. Deep OFFSET queries are expensive on D1,
-// and crawlers re-fetch these files often. The browser max-age header alone
-// does not make Cloudflare cache a Worker response.
-const SITEMAP_EDGE_TTL = 21600; // 6 hours
-
-export const GET: APIRoute = async (ctx) => {
-    const cfCache = (typeof caches !== 'undefined') ? caches.default : null;
-    const cacheKey = new Request(new URL(ctx.request.url).toString(), { method: 'GET' });
-    if (cfCache) {
-        const hit = await cfCache.match(cacheKey);
-        if (hit) return hit;
-    }
-    const res = await buildSitemapPage(ctx);
-    if (cfCache && res.status === 200) {
-        const toStore = new Response(res.clone().body, {
-            status: 200,
-            headers: {
-                'Content-Type': 'application/xml; charset=utf-8',
-                'Cache-Control': 'public, max-age=' + SITEMAP_EDGE_TTL
-            }
-        });
-        cfCache.put(cacheKey, toStore).catch(() => {});
-    }
-    return res;
-};
+// Stored in R2 for 6 hours. Deep OFFSET queries are expensive on D1 and crawlers
+// fetch these files often. A stale copy is served if D1 fails.
+export const GET: APIRoute = async (ctx) =>
+    serveStoredResponse(env, `sitemap-entries-${ctx.params.page || '1'}.xml`, 21600, 'application/xml; charset=utf-8', () => buildSitemapPage(ctx), (ctx.locals as any)?.cfContext);
 
 const buildSitemapPage: APIRoute = async ({ params, request }) => {
     if (!env || !env.DB) {
