@@ -124,8 +124,13 @@ export const GET: APIRoute = async ({ request }) => {
 
             if (termIds.length > 0) {
                 // 4b: Fetch the terms — PK lookups only
-                const tRows = await db.select({ id: terms.id, name: terms.name, taxonomyId: terms.taxonomyId })
-                    .from(terms).where(inArray(terms.id, termIds));
+                // Chunk at 90 IDs: D1 rejects more than 100 bound parameters.
+                const tRows: any[] = [];
+                for (let t = 0; t < termIds.length; t += 90) {
+                    const rows = await db.select({ id: terms.id, name: terms.name, taxonomyId: terms.taxonomyId })
+                        .from(terms).where(inArray(terms.id, termIds.slice(t, t + 90)));
+                    tRows.push(...rows);
+                }
 
                 // 4c: Get taxonomy IDs to filter by 'categories' only
                 const taxIds = Array.from(new Set(tRows.map(t => t.taxonomyId)));
