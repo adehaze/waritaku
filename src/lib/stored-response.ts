@@ -46,6 +46,19 @@ export async function serveStoredResponse(
     // Copy the stale body now. A stream cannot be read twice.
     const staleText = stale ? await stale.text() : null;
 
+    // Failure backoff: if a recent build failed and there is no copy to serve,
+    // do not rebuild. Each rebuild runs the expensive D1 queries again.
+    const failKey = `${storeKey}.fail`;
+    if (staleText === null) {
+        try {
+            const marker = await bucket.head(failKey);
+            const failedAt = Date.parse(marker?.customMetadata?.failedAt || '') || 0;
+            if (Date.now() - failedAt < FAIL_BACKOFF_MS) {
+                return new Response('Service temporarily unavailable', { status: 503, headers: { 'Retry-After': '600' } });
+            }
+        } catch {}
+    }
+
     try {
         const fresh = await build();
         if (fresh.status !== 200) throw new Error(`build returned ${fresh.status}`);
@@ -61,9 +74,14 @@ export async function serveStoredResponse(
         if (staleText !== null) {
             return new Response(staleText, { status: 200, headers: { ...headers, 'X-Cache': 'STALE' } });
         }
-        return new Response('Service temporarily unavailable', { status: 503, headers: { 'Retry-After': '300' } });
+        const mark = bucket.put(failKey, '1', { customMetadata: { failedAt: new Date().toISOString() } })
+            .catch(() => {});
+        if (ctx?.waitUntil) ctx.waitUntil(mark); else await mark;
+        return new Response('Service temporarily unavailable', { status: 503, headers: { 'Retry-After': '600' } });
     }
 }
+
+const FAIL_BACKOFF_MS = 10 * 60 * 1000; // 10 minutes
 
 /** Delete all stored sitemap copies. Call this after content changes. */
 export async function invalidateStoredResponses(env: any, keys: string[]): Promise<void> {
@@ -74,3 +92,7 @@ export async function invalidateStoredResponses(env: any, keys: string[]): Promi
         console.error('[stored-response] invalidate error:', err);
     }
 }
+
+/** Entries per sitemap page. The sitemap index and the page route must use the same value.
+ *  Kept small so one page stays under the Worker CPU limit and the D1 per-request query limit. */
+export const SITEMAP_PAGE_SIZE = 250;
