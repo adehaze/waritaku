@@ -4,7 +4,7 @@ import { eq, and, inArray } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 
 import { getDb } from '../lib/db';
-import { serveStoredResponse } from '../lib/stored-response';
+import { serveStoredResponse, SITEMAP_PAGE_SIZE } from '../lib/stored-response';
 
 const build: APIRoute = async ({ request }) => {
     
@@ -46,13 +46,13 @@ const build: APIRoute = async ({ request }) => {
         const res = await colQuery;
         totalEntries = Number(res[0]?.total || 0);
     }
-    const CHUNK_SIZE = 1000;
+    const CHUNK_SIZE = SITEMAP_PAGE_SIZE;
     const totalEntryPages = Math.max(1, Math.ceil(totalEntries / CHUNK_SIZE));
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;
 
-    // 1. Entries Sitemaps (Chunked by 1000)
+    // 1. Entries Sitemaps (Chunked by SITEMAP_PAGE_SIZE)
     for (let p = 1; p <= totalEntryPages; p++) {
         if (totalEntries > 0) {
             xml += `  <sitemap>\n    <loc>${siteUrl}/sitemap-entries-${p}.xml</loc>\n  </sitemap>\n`;
@@ -75,4 +75,4 @@ const build: APIRoute = async ({ request }) => {
 };
 
 export const GET: APIRoute = async (ctx) =>
-    serveStoredResponse(env, 'sitemap-index.xml', 21600, 'application/xml; charset=utf-8', () => build(ctx), (ctx.locals as any)?.cfContext);
+    serveStoredResponse(env, 'sitemap-index-v2.xml', 21600, 'application/xml; charset=utf-8', () => build(ctx), (ctx.locals as any)?.cfContext);
