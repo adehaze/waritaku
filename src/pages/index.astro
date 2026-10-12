@@ -215,8 +215,13 @@ if (env && (env as any).DB) {
             const etRows2 = await db.select().from(entryTerms).where(inArray(entryTerms.entryId, entryIds));
             const tIds = Array.from(new Set(etRows2.map((r: any) => r.termId)));
             if (tIds.length > 0) {
-                const tRows = await db.select({ id: terms.id, name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId })
-                    .from(terms).where(inArray(terms.id, tIds));
+                // Chunk at 90 IDs: D1 rejects more than 100 bound parameters.
+                const tRows: any[] = [];
+                for (let t = 0; t < tIds.length; t += 90) {
+                    const rows = await db.select({ id: terms.id, name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId })
+                        .from(terms).where(inArray(terms.id, tIds.slice(t, t + 90)));
+                    tRows.push(...rows);
+                }
                 const taxIds = Array.from(new Set(tRows.map((t: any) => t.taxonomyId)));
                 const taxRows = taxIds.length > 0
                     ? await db.select({ id: taxonomies.id, slug: taxonomies.slug }).from(taxonomies).where(inArray(taxonomies.id, taxIds))
