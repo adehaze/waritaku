@@ -4,12 +4,12 @@ import { eq, desc, and, inArray, sql } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
 import { getCanonicalUrls } from '../lib/queries';
-import { serveStoredResponse } from '../lib/stored-response';
+import { serveStoredResponse, SITEMAP_PAGE_SIZE } from '../lib/stored-response';
 
-// Stored in R2 for 6 hours. Deep OFFSET queries are expensive on D1 and crawlers
+// Stored in R2 for 24 hours. Deep OFFSET queries are expensive on D1 and crawlers
 // fetch these files often. A stale copy is served if D1 fails.
 export const GET: APIRoute = async (ctx) =>
-    serveStoredResponse(env, `sitemap-entries-${ctx.params.page || '1'}.xml`, 21600, 'application/xml; charset=utf-8', () => buildSitemapPage(ctx), (ctx.locals as any)?.cfContext);
+    serveStoredResponse(env, `sitemap-entries-v2-${ctx.params.page || '1'}.xml`, 86400, 'application/xml; charset=utf-8', () => buildSitemapPage(ctx), (ctx.locals as any)?.cfContext);
 
 const buildSitemapPage: APIRoute = async ({ params, request }) => {
     if (!env || !env.DB) {
@@ -33,7 +33,7 @@ const buildSitemapPage: APIRoute = async ({ params, request }) => {
     }
 
     const page = parseInt(params.page || '1', 10);
-    const CHUNK_SIZE = 1000;
+    const CHUNK_SIZE = SITEMAP_PAGE_SIZE;
     
     let allowedColIds: number[] | null = null;
     if (sitemapCollections !== null) {
