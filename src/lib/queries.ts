@@ -79,25 +79,37 @@ export async function getCanonicalUrls(
 
         const termIds = Array.from(new Set(etRows.map((r: any) => r.termId))) as number[];
 
-        // Step 2: terms by PK — id is the primary key, pure PK lookup
-        const termRows = termIds.length > 0
-            ? await db.select({ id: terms.id, slug: terms.slug, taxonomyId: terms.taxonomyId })
-                .from(terms).where(inArray(terms.id, termIds))
-            : [];
+        // Step 2: terms by PK. Chunk at 90 IDs: D1 rejects more than 100 bound
+        // parameters, and 50 entries with many tags can reference 150+ terms.
+        const termRows: any[] = [];
+        for (let t = 0; t < termIds.length; t += 90) {
+            const rows = await db.select({ id: terms.id, slug: terms.slug, taxonomyId: terms.taxonomyId })
+                .from(terms).where(inArray(terms.id, termIds.slice(t, t + 90)));
+            termRows.push(...rows);
+        }
 
-        // Step 3: entries by PK — fetch data + collectionId, no JOIN to collections
-        const entryRows = await db.select({ id: entries.id, data: entries.data, collectionId: entries.collectionId })
+        // Step 3: entries by PK. Read only the two override fields with json_extract.
+        // Loading the full data blob (article HTML) here costs CPU and bandwidth.
+        const entryRows = await db.select({
+            id: entries.id,
+            collectionId: entries.collectionId,
+            primaryTermId: sql<any>`json_extract(${entries.data}, '$.primaryTermId')`,
+            primaryTaxonomyOverride: sql<any>`json_extract(${entries.data}, '$.primaryTaxonomyOverride')`,
+        })
             .from(entries)
             .where(inArray(entries.id, chunk));
 
         // ── JS joins (zero D1 reads) ──────────────────────────────────────────
         const termById = new Map(termRows.map((t: any) => [t.id, t]));
 
-        // Build entryData map (data JSON + supports from cached collections)
+        // Build entryData map (override fields + supports from cached collections)
         const entryDataMap: Record<number, { data: string, supports: string }> = {};
         for (const e of entryRows) {
             const col = collectionById.get(e.collectionId);
-            entryDataMap[e.id] = { data: e.data || '{}', supports: col?.supports || '{}' };
+            entryDataMap[e.id] = {
+                data: JSON.stringify({ primaryTermId: e.primaryTermId ?? undefined, primaryTaxonomyOverride: e.primaryTaxonomyOverride ?? undefined }),
+                supports: col?.supports || '{}'
+            };
         }
 
         // Group terms by entry
@@ -390,22 +402,35 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
         const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
 
-        // Fetch paginated entries
-        const articlesResult = await db.select({
-            entry: entries,
-            author: users
-        })
-        .from(entries)
-        .leftJoin(users, eq(entries.authorId, users.id))
-        .where(
-            and(
-                eq(entries.collectionId, collection.id),
-                eq(entries.status, 'published')
-            )
-        )
-        .orderBy(desc(entries.id))
-        .limit(pageSize)
-        .offset((currentPage - 1) * pageSize);
+        // Fetch paginated entries in two steps.
+        // Step 1: IDs only. SQLite walks the (collection_id, status, id) index and does
+        // not load article blobs for the rows skipped by OFFSET.
+        const pageIdRows = await db.select({ id: entries.id })
+            .from(entries)
+            .where(and(eq(entries.collectionId, collection.id), eq(entries.status, 'published')))
+            .orderBy(desc(entries.id))
+            .limit(pageSize)
+            .offset((currentPage - 1) * pageSize);
+        const pageIds = pageIdRows.map((r: any) => r.id);
+
+        // Step 2: full rows by PK, then authors by PK (no password_hash or email).
+        const pageEntryRows = pageIds.length > 0
+            ? await db.select().from(entries).where(inArray(entries.id, pageIds))
+            : [];
+        const authorIds = Array.from(new Set(pageEntryRows.map((e: any) => e.authorId).filter(Boolean))) as number[];
+        const authorRows = authorIds.length > 0
+            ? await db.select({
+                id: users.id, name: users.name, slug: users.slug, role: users.role,
+                firstName: users.firstName, lastName: users.lastName, bio: users.bio,
+                avatarUrl: users.avatarUrl, socialLinks: users.socialLinks,
+            }).from(users).where(inArray(users.id, authorIds))
+            : [];
+        const authorById = new Map(authorRows.map((u: any) => [u.id, u]));
+        const entryById = new Map(pageEntryRows.map((e: any) => [e.id, e]));
+        const articlesResult = pageIds
+            .map((id: number) => entryById.get(id))
+            .filter(Boolean)
+            .map((e: any) => ({ entry: e, author: authorById.get(e.authorId) || null }));
 
         const categoryArticles = [];
         const entryIds = articlesResult.map((r: any) => r.entry.id);
