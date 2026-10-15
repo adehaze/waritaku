@@ -631,31 +631,38 @@ if (Astro.request.method === 'POST') {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         })
-          .then(r => r.json() as Promise<any>)
+          .then(async r => {
+            const text = await r.text();
+            let data: any;
+            try {
+              data = JSON.parse(text);
+            } catch {
+              throw new Error(`Server returned HTTP ${r.status} (${r.statusText || 'Error'}).`);
+            }
+            if (!r.ok || !data.success) {
+              throw new Error(data.error || `Request failed with HTTP ${r.status}`);
+            }
+            return data;
+          })
           .then(data => {
-            if (data.success) {
-              resultEl.className = 'text-xs font-medium mt-2 text-emerald-600 dark:text-emerald-400';
-              if (body.action === 'purge_url') {
-                resultEl.textContent = `✅ Purged: ${data.purged?.join(', ')}`;
-              } else if (body.action === 'purge_scoped') {
-                resultEl.textContent = `✅ Deleted ${data.deleted} cached page${data.deleted !== 1 ? 's' : ''}.`;
-              } else if (body.action === 'purge_all') {
-                resultEl.textContent = `✅ Purged ${data.deleted} cached page${data.deleted !== 1 ? 's' : ''} from R2 and Cloudflare.`;
-              } else if (body.action === 'purge_collection') {
-                resultEl.textContent = `✅ Purged ${data.deleted} collection pages (${data.edgePurged} edge URLs).${data.note ? ' ⚠ ' + data.note : ''}`;
-              } else if (body.action === 'purge_taxonomy') {
-                resultEl.textContent = `✅ Purged ${data.deleted} taxonomy pages (${data.edgePurged} edge URLs).${data.note ? ' ⚠ ' + data.note : ''}`;
-              } else {
-                resultEl.textContent = `✅ Success: ${data.deleted} items deleted.`;
-              }
+            resultEl.className = 'text-xs font-medium mt-2 text-emerald-600 dark:text-emerald-400';
+            if (body.action === 'purge_url') {
+              resultEl.textContent = `✅ Purged: ${data.purged?.join(', ')}`;
+            } else if (body.action === 'purge_scoped') {
+              resultEl.textContent = `✅ Deleted ${data.deleted} cached page${data.deleted !== 1 ? 's' : ''}.`;
+            } else if (body.action === 'purge_all') {
+              resultEl.textContent = `✅ Purged ${data.deleted} cached page${data.deleted !== 1 ? 's' : ''} from R2 and Cloudflare.`;
+            } else if (body.action === 'purge_collection') {
+              resultEl.textContent = `✅ Purged ${data.deleted} collection pages (${data.edgePurged ?? 0} edge URLs).${data.note ? ' ⚠ ' + data.note : ''}`;
+            } else if (body.action === 'purge_taxonomy') {
+              resultEl.textContent = `✅ Purged ${data.deleted} taxonomy pages (${data.edgePurged ?? 0} edge URLs).${data.note ? ' ⚠ ' + data.note : ''}`;
             } else {
-              resultEl.className = 'text-xs font-medium mt-2 text-destructive';
-              resultEl.textContent = '❌ Error: ' + (data.error || 'Unknown error');
+              resultEl.textContent = `✅ Success: ${data.deleted} items deleted.`;
             }
           })
           .catch(err => {
             resultEl.className = 'text-xs font-medium mt-2 text-destructive';
-            resultEl.textContent = '❌ Network error: ' + err.message;
+            resultEl.textContent = '❌ Error: ' + err.message;
           })
           .finally(() => {
             btn.disabled = false;
