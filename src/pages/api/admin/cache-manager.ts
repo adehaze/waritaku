@@ -16,23 +16,56 @@ function keyToPathname(key: string): string {
     return withoutExt === '/index' ? '/' : withoutExt;
 }
 
+/** Purge the entire Cloudflare edge cache in a single fast API call. */
+async function purgeEdgeEverything(env: any): Promise<boolean> {
+    const zoneId = env?.CLOUDFLARE_ZONE_ID;
+    const apiToken = env?.CLOUDFLARE_CACHE_TOKEN;
+    if (!zoneId || !apiToken) return false;
+
+    try {
+        const res = await fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiToken}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ purge_everything: true }),
+        });
+        if (!res.ok) {
+            const errText = await res.text();
+            console.error('[cache-manager] Purge everything failed:', res.status, errText);
+            return false;
+        }
+        return true;
+    } catch (err) {
+        console.error('[cache-manager] Purge everything error:', err);
+        return false;
+    }
+}
+
 /** Purge Cloudflare edge cache for a list of absolute URLs. */
 async function purgeEdgeUrls(env: any, urls: string[]): Promise<void> {
     const zoneId = env?.CLOUDFLARE_ZONE_ID;
     const apiToken = env?.CLOUDFLARE_CACHE_TOKEN;
     if (!zoneId || !apiToken || urls.length === 0) return;
 
+    // Cloudflare Workers free plan caps subrequests to 50 per invocation.
+    // If the URL list requires more than 20 subrequests (>600 URLs), use purge_everything
+    // to prevent Worker subrequest limit exceptions.
+    if (urls.length > 600) {
+        await purgeEdgeEverything(env);
+        return;
+    }
+
     // CF purge API accepts max 30 URLs per request
-    // To prevent exceeding Worker subrequest limits (1000 per invocation), we cap edge purging to 15,000 URLs (500 requests).
-    const safeUrls = urls.slice(0, 15000);
     const chunks: string[][] = [];
-    for (let i = 0; i < safeUrls.length; i += 30) {
-        chunks.push(safeUrls.slice(i, i + 30));
+    for (let i = 0; i < urls.length; i += 30) {
+        chunks.push(urls.slice(i, i + 30));
     }
     
-    // Process in batches of 10 concurrent requests to avoid hitting simultaneous connection limits
-    for (let i = 0; i < chunks.length; i += 10) {
-        await Promise.all(chunks.slice(i, i + 10).map(chunk =>
+    // Process in batches of 5 concurrent requests with error catching
+    for (let i = 0; i < chunks.length; i += 5) {
+        await Promise.all(chunks.slice(i, i + 5).map(chunk =>
             fetch(`https://api.cloudflare.com/client/v4/zones/${zoneId}/purge_cache`, {
                 method: 'POST',
                 headers: {
@@ -40,7 +73,7 @@ async function purgeEdgeUrls(env: any, urls: string[]): Promise<void> {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({ files: chunk }),
-            })
+            }).catch(err => console.error('[cache-manager] Chunk purge error:', err))
         ));
     }
 }
@@ -236,16 +269,21 @@ export const POST: APIRoute = async (ctx) => {
             edgeUrls.push(`${siteOrigin}/${collectionSlug}`);
 
             if (entriesData.length > 0) {
-                // getCanonicalUrls is now self-chunking at 50 IDs per query internally.
-                const canonicalMap = await getCanonicalUrls(db, entriesData.map(e => e.id));
-                
-                for (const e of entriesData) {
-                    const prefix = canonicalMap[e.id];
-                    const path = prefix ? `/${prefix}/${e.slug}` : `/${e.slug}`;
-                    r2Keys.push(`rendered${path}.html`);
-                    // Only collect edge URLs if small enough to not blow the subrequest limit
-                    if (entriesData.length <= 300) {
+                if (entriesData.length <= 300) {
+                    // Small collection: query canonical URLs and purge individual edge URLs
+                    const canonicalMap = await getCanonicalUrls(db, entriesData.map(e => e.id));
+                    for (const e of entriesData) {
+                        const prefix = canonicalMap[e.id];
+                        const path = prefix ? `/${prefix}/${e.slug}` : `/${e.slug}`;
+                        r2Keys.push(`rendered${path}.html`);
                         edgeUrls.push(`${siteOrigin}${path}`);
+                    }
+                } else {
+                    // Large collection: skip expensive batched D1 queries.
+                    // Add root and collection-prefixed keys directly.
+                    for (const e of entriesData) {
+                        r2Keys.push(`rendered/${e.slug}.html`);
+                        r2Keys.push(`rendered/${collectionSlug}/${e.slug}.html`);
                     }
                 }
             }
@@ -264,23 +302,30 @@ export const POST: APIRoute = async (ctx) => {
                 } while (cursor);
             }
 
+            // Deduplicate R2 keys before deletion
+            const uniqueKeys = Array.from(new Set(r2Keys));
+
             // Delete from R2 in bulk
-            for (let i = 0; i < r2Keys.length; i += 1000) {
-                await (env as any).RENDER_CACHE.delete(r2Keys.slice(i, i + 1000));
+            for (let i = 0; i < uniqueKeys.length; i += 1000) {
+                await (env as any).RENDER_CACHE.delete(uniqueKeys.slice(i, i + 1000));
             }
             
-            // Only purge edge cache individually for smaller collections.
-            // For large collections (>300 entries), R2 deletion is sufficient —
-            // the next visitor triggers a fresh SSR and re-caches automatically.
-            if (edgeUrls.length > 0) {
+            // Purge Edge Cache
+            let edgePurged = 0;
+            if (entriesData.length <= 300 && edgeUrls.length > 0) {
                 await purgeEdgeUrls(env, edgeUrls);
+                edgePurged = edgeUrls.length;
+            } else if (entriesData.length > 300) {
+                // For large collections, purge the entire edge cache in 1 fast subrequest
+                await purgeEdgeEverything(env);
+                edgePurged = uniqueKeys.length;
             }
             
             return new Response(JSON.stringify({ 
                 success: true, 
-                deleted: r2Keys.length,
-                edgePurged: edgeUrls.length,
-                note: entriesData.length > 300 ? 'R2 cleared. Edge cache will refresh on next visitor request (too many entries for individual URL purge).' : undefined
+                deleted: uniqueKeys.length,
+                edgePurged,
+                note: entriesData.length > 300 ? 'All edge cache purged (collection size exceeds subrequest limit for per-URL purge).' : undefined
             }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         } catch (e: any) {
             return new Response(JSON.stringify({ error: e.message }), { status: 500 });
@@ -308,46 +353,58 @@ export const POST: APIRoute = async (ctx) => {
             for (const t of termsData) {
                 const path = tax.omitTaxonomySlug ? `/${t.slug}` : `/${tax.slug}/${t.slug}`;
                 r2Keys.push(`rendered${path}.html`);
-                // Only collect edge URLs for small taxonomies
                 if (termsData.length <= 300) {
                     edgeUrls.push(`${siteOrigin}${path}`);
                 }
             }
             
-            // Also sweep each term's prefix to catch paginated term archive pages.
-            // e.g. rendered/kategori/anime/page/2.html, rendered/tag/isekai/page/3.html
-            // We cannot know which page numbers exist without listing R2.
-            for (const t of termsData) {
-                const termPrefix = tax.omitTaxonomySlug
-                    ? `rendered/${t.slug}/`
-                    : `rendered/${tax.slug}/${t.slug}/`;
+            // Sweep R2 to catch paginated term archive pages (e.g. rendered/kategori/anime/page/2.html)
+            if (!tax.omitTaxonomySlug) {
+                // If taxonomy has a prefix (e.g. /kategori/), one single sweep covers all terms!
                 let cursor: string | undefined;
                 do {
-                    const opts: any = { prefix: termPrefix, limit: 1000 };
+                    const opts: any = { prefix: `rendered/${tax.slug}/`, limit: 1000 };
                     if (cursor) opts.cursor = cursor;
                     const listed = await (env as any).RENDER_CACHE.list(opts);
                     for (const o of listed.objects) r2Keys.push(o.key);
                     cursor = listed.truncated ? listed.cursor : undefined;
                 } while (cursor);
+            } else {
+                // When omitTaxonomySlug is true, sweep each term prefix (max 50 terms to protect subrequest limit)
+                const termsToSweep = termsData.slice(0, 50);
+                for (const t of termsToSweep) {
+                    let cursor: string | undefined;
+                    do {
+                        const opts: any = { prefix: `rendered/${t.slug}/`, limit: 1000 };
+                        if (cursor) opts.cursor = cursor;
+                        const listed = await (env as any).RENDER_CACHE.list(opts);
+                        for (const o of listed.objects) r2Keys.push(o.key);
+                        cursor = listed.truncated ? listed.cursor : undefined;
+                    } while (cursor);
+                }
             }
+
+            const uniqueKeys = Array.from(new Set(r2Keys));
 
             // Delete from R2 in bulk
-            for (let i = 0; i < r2Keys.length; i += 1000) {
-                await (env as any).RENDER_CACHE.delete(r2Keys.slice(i, i + 1000));
+            for (let i = 0; i < uniqueKeys.length; i += 1000) {
+                await (env as any).RENDER_CACHE.delete(uniqueKeys.slice(i, i + 1000));
             }
 
-            
-            // For large taxonomies, skip individual URL purging to avoid subrequest limits.
-            // Stale edge pages will be replaced on next visitor request after R2 is cleared.
-            if (edgeUrls.length > 0) {
+            let edgePurged = 0;
+            if (termsData.length <= 300 && edgeUrls.length > 0) {
                 await purgeEdgeUrls(env, edgeUrls);
+                edgePurged = edgeUrls.length;
+            } else if (termsData.length > 300) {
+                await purgeEdgeEverything(env);
+                edgePurged = uniqueKeys.length;
             }
             
             return new Response(JSON.stringify({ 
                 success: true, 
-                deleted: r2Keys.length,
-                edgePurged: edgeUrls.length,
-                note: termsData.length > 300 ? 'R2 cleared. Edge cache will refresh on next visitor request (too many terms for individual URL purge).' : undefined
+                deleted: uniqueKeys.length,
+                edgePurged,
+                note: termsData.length > 300 ? 'All edge cache purged (taxonomy size exceeds subrequest limit for per-URL purge).' : undefined
             }), { status: 200, headers: { 'Content-Type': 'application/json' } });
         } catch (e: any) {
             return new Response(JSON.stringify({ error: e.message }), { status: 500 });
@@ -365,11 +422,14 @@ export const POST: APIRoute = async (ctx) => {
                 await (env as any).RENDER_CACHE.delete(keyStrings.slice(i, i + 1000));
             }
 
-            // Purge CF edge for each URL individually (not purge_everything)
-            const urls = allKeys.map(k => `${siteOrigin}${keyToPathname(k.key)}`);
-            await purgeEdgeUrls(env, urls);
+            // Purge Cloudflare edge cache completely in ONE fast API call
+            const edgePurged = await purgeEdgeEverything(env);
 
-            return new Response(JSON.stringify({ success: true, deleted: allKeys.length }), {
+            return new Response(JSON.stringify({ 
+                success: true, 
+                deleted: allKeys.length,
+                edgePurged 
+            }), {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' },
             });
