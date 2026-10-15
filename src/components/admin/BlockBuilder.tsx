@@ -238,7 +238,12 @@ export default function BlockBuilder({ blocks: rawBlocks, setBlocks }: any) {
                 onChange={(e) => {
                   const newFilters = [...(block[field.name] || [])];
                   newFilters[fIdx] = { taxonomyId: e.target.value, termId: 'all' };
-                  updateBlock(index, { [field.name]: newFilters });
+                  const firstFilter = newFilters[0];
+                  updateBlock(index, { 
+                    [field.name]: newFilters,
+                    filterTaxonomyId: firstFilter?.taxonomyId || '',
+                    filterTermId: firstFilter?.termId || 'all'
+                  });
                 }}
                 className="w-full md:w-1/2 px-2 py-1.5 border border-input rounded text-sm bg-transparent"
               >
@@ -251,7 +256,12 @@ export default function BlockBuilder({ blocks: rawBlocks, setBlocks }: any) {
                 onChange={(e) => {
                   const newFilters = [...(block[field.name] || [])];
                   newFilters[fIdx] = { ...newFilters[fIdx], termId: e.target.value };
-                  updateBlock(index, { [field.name]: newFilters });
+                  const firstFilter = newFilters[0];
+                  updateBlock(index, { 
+                    [field.name]: newFilters,
+                    filterTaxonomyId: firstFilter?.taxonomyId || '',
+                    filterTermId: firstFilter?.termId || 'all'
+                  });
                 }}
                 disabled={!filter.taxonomyId}
                 className="w-full md:w-1/2 px-2 py-1.5 border border-input rounded text-sm bg-transparent disabled:opacity-50"
@@ -267,7 +277,12 @@ export default function BlockBuilder({ blocks: rawBlocks, setBlocks }: any) {
                 onClick={() => {
                   const newFilters = [...(block[field.name] || [])];
                   newFilters.splice(fIdx, 1);
-                  updateBlock(index, { [field.name]: newFilters });
+                  const firstFilter = newFilters[0];
+                  updateBlock(index, { 
+                    [field.name]: newFilters,
+                    filterTaxonomyId: firstFilter?.taxonomyId || '',
+                    filterTermId: firstFilter?.termId || 'all'
+                  });
                 }}
                 className="p-1.5 text-destructive hover:bg-destructive/10 rounded"
               >

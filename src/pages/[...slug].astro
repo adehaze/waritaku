@@ -274,6 +274,58 @@ if (!isHomepageFallback && env && env.DB && slug) {
               };
 
               const promises = layoutBlocks.map(async (block) => {
+                  const activeFilters = (Array.isArray(block.filters) ? block.filters : []).filter((f: any) => f && f.taxonomyId && f.taxonomyId !== 'all');
+                  const termFilter = activeFilters.find((f: any) => f.termId && f.termId !== 'all');
+                  const effectiveTermId = termFilter?.termId || (block.filterTermId && block.filterTermId !== 'all' ? block.filterTermId : (block.categoryId && block.categoryId !== 'all' ? block.categoryId : null));
+                  const effectiveTaxId = termFilter?.taxonomyId || activeFilters[0]?.taxonomyId || (block.filterTaxonomyId && block.filterTaxonomyId !== 'all' ? block.filterTaxonomyId : null);
+                  const effectiveTag = block.tagSlug || null;
+                  const effectiveCollection = block.collectionId || 'articles';
+
+                  let archiveUrl = effectiveCollection;
+                  let archiveTitle = '';
+
+                  if (effectiveTermId) {
+                      const termRow = await db.select({
+                          id: terms.id,
+                          name: terms.name,
+                          slug: terms.slug,
+                          taxonomyId: terms.taxonomyId
+                      }).from(terms).where(eq(terms.id, parseInt(effectiveTermId.toString()))).limit(1);
+
+                      if (termRow.length > 0) {
+                          archiveTitle = termRow[0].name;
+                          const taxRow = await db.select({
+                              slug: taxonomies.slug,
+                              omitTaxonomySlug: taxonomies.omitTaxonomySlug
+                          }).from(taxonomies).where(eq(taxonomies.id, termRow[0].taxonomyId)).limit(1);
+
+                          if (taxRow.length > 0 && !taxRow[0].omitTaxonomySlug) {
+                              archiveUrl = `${taxRow[0].slug}/${termRow[0].slug}`;
+                          } else {
+                              archiveUrl = termRow[0].slug;
+                          }
+                      }
+                  } else if (effectiveTaxId) {
+                      const taxRow = await db.select({
+                          slug: taxonomies.slug,
+                          label: taxonomies.label
+                      }).from(taxonomies).where(eq(taxonomies.id, parseInt(effectiveTaxId.toString()))).limit(1);
+
+                      if (taxRow.length > 0) {
+                          archiveTitle = taxRow[0].label;
+                          archiveUrl = taxRow[0].slug;
+                      }
+                  } else if (effectiveTag) {
+                      archiveTitle = effectiveTag;
+                      archiveUrl = `tag/${effectiveTag}`;
+                  }
+
+                  block.archiveUrl = archiveUrl;
+                  block.categorySlug = archiveUrl;
+                  if (!block.title && archiveTitle) {
+                      block.title = archiveTitle;
+                  }
+
                   if (block.type === 'hero' || block.type === 'hero_2' || block.type === 'hero_3') {
                       blockData[block.id] = await fetchArticles({ limit: block.limit || 5, collectionId: block.collectionId });
                   } else if (block.type === 'category_block') {

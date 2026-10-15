@@ -102,12 +102,43 @@ if (env && (env as any).DB) {
         categoryId?: string | number, 
         filterTaxonomyId?: string | number,
         filterTermId?: string | number,
+        filters?: { taxonomyId?: string | number, termId?: string | number }[],
+        filterMatchType?: string,
+        collectionId?: string | number,
         limit?: number, 
         offset?: number, 
         tagSlug?: string 
     } = {}) => {
-        const { categoryId, filterTaxonomyId, filterTermId, limit = 5, offset = 0, tagSlug } = options;
-        if (contentColIds.length === 0) return [];
+        const { 
+            categoryId, 
+            filterTaxonomyId: rawTaxId, 
+            filterTermId: rawTermId, 
+            filters = [], 
+            filterMatchType = 'AND',
+            collectionId,
+            limit = 5, 
+            offset = 0, 
+            tagSlug 
+        } = options;
+
+        let targetColIds = contentColIds;
+        if (collectionId) {
+            const col = contentColsResult.find((c: any) => c.slug === collectionId || c.id.toString() === collectionId.toString());
+            if (col) {
+                targetColIds = [col.id];
+            }
+        }
+        if (targetColIds.length === 0) return [];
+
+        const activeFilters = (Array.isArray(filters) ? filters : []).filter((f: any) => f && f.taxonomyId && f.taxonomyId !== 'all');
+        const firstActive = activeFilters[0];
+
+        const filterTermId = (firstActive && firstActive.termId && firstActive.termId !== 'all')
+            ? firstActive.termId
+            : rawTermId;
+        const filterTaxonomyId = (firstActive && firstActive.taxonomyId && firstActive.taxonomyId !== 'all')
+            ? firstActive.taxonomyId
+            : rawTaxId;
 
         const hasLegacyFilter = (categoryId && categoryId !== 'all') || tagSlug;
         const hasTaxonomyFilter = filterTaxonomyId && filterTaxonomyId !== 'all';
@@ -147,7 +178,7 @@ if (env && (env as any).DB) {
             // Step 3: Verify by PK only — pure id IN (chunk), forces SQLite to use PK index.
             const D1_CHUNK = 50;
             let confirmed: { id: number, collectionId: number, status: string }[] = [];
-            const contentColIdSet = new Set(contentColIds);
+            const targetColIdSet = new Set(targetColIds);
             
             for (let i = 0; i < candidateIds.length; i += D1_CHUNK) {
                 const chunk = candidateIds.slice(i, i + D1_CHUNK);
@@ -155,7 +186,7 @@ if (env && (env as any).DB) {
                     .from(entries)
                     .where(inArray(entries.id, chunk));
                     
-                const valid = rows.filter((r: any) => r.status === 'published' && contentColIdSet.has(r.collectionId));
+                const valid = rows.filter((r: any) => r.status === 'published' && targetColIdSet.has(r.collectionId));
                 confirmed = confirmed.concat(valid);
                 
                 if (confirmed.length >= offset + limit) {
@@ -170,7 +201,7 @@ if (env && (env as any).DB) {
             // No filter — composite index: status + collection_id + id
             const idRows = await db.select({ id: entries.id })
                 .from(entries)
-                .where(and(eq(entries.status, 'published'), inArray(entries.collectionId, contentColIds)))
+                .where(and(eq(entries.status, 'published'), inArray(entries.collectionId, targetColIds)))
                 .orderBy(desc(entries.id))
                 .limit(limit)
                 .offset(offset);
@@ -202,11 +233,19 @@ if (env && (env as any).DB) {
         const categoryMap: Record<number, { id: number, name: string, slug: string }[]> = {};
 
         if (hasTermFilter) {
-            const row = await db.select({ name: terms.name, slug: terms.slug }).from(terms).where(eq(terms.id, parseInt(filterTermId as string))).limit(1);
-            if (row.length > 0) { filterCategoryName = row[0].name; filterCategorySlug = row[0].slug; }
+            const row = await db.select({ name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId }).from(terms).where(eq(terms.id, parseInt(filterTermId as string))).limit(1);
+            if (row.length > 0) { 
+                filterCategoryName = row[0].name; 
+                const tax = await db.select({ slug: taxonomies.slug, omitTaxonomySlug: taxonomies.omitTaxonomySlug }).from(taxonomies).where(eq(taxonomies.id, row[0].taxonomyId)).limit(1);
+                filterCategorySlug = (tax.length > 0 && !tax[0].omitTaxonomySlug) ? `${tax[0].slug}/${row[0].slug}` : row[0].slug;
+            }
         } else if (categoryId && categoryId !== 'all') {
-            const row = await db.select({ name: terms.name, slug: terms.slug }).from(terms).where(eq(terms.id, parseInt(categoryId as string))).limit(1);
-            if (row.length > 0) { filterCategoryName = row[0].name; filterCategorySlug = row[0].slug; }
+            const row = await db.select({ name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId }).from(terms).where(eq(terms.id, parseInt(categoryId as string))).limit(1);
+            if (row.length > 0) { 
+                filterCategoryName = row[0].name; 
+                const tax = await db.select({ slug: taxonomies.slug, omitTaxonomySlug: taxonomies.omitTaxonomySlug }).from(taxonomies).where(eq(taxonomies.id, row[0].taxonomyId)).limit(1);
+                filterCategorySlug = (tax.length > 0 && !tax[0].omitTaxonomySlug) ? `${tax[0].slug}/${row[0].slug}` : row[0].slug;
+            }
         } else if (tagSlug) {
             filterCategoryName = tagSlug;
             filterCategorySlug = `tag/${tagSlug}`;
@@ -273,46 +312,112 @@ if (env && (env as any).DB) {
     };
 
     const promises = layoutBlocks.filter((b: any) => b && b.type).map(async (block) => {
+        // Resolve filters & target archive URL dynamically
+        const activeFilters = (Array.isArray(block.filters) ? block.filters : []).filter((f: any) => f && f.taxonomyId && f.taxonomyId !== 'all');
+        const termFilter = activeFilters.find((f: any) => f.termId && f.termId !== 'all');
+        const effectiveTermId = termFilter?.termId || (block.filterTermId && block.filterTermId !== 'all' ? block.filterTermId : (block.categoryId && block.categoryId !== 'all' ? block.categoryId : null));
+        const effectiveTaxId = termFilter?.taxonomyId || activeFilters[0]?.taxonomyId || (block.filterTaxonomyId && block.filterTaxonomyId !== 'all' ? block.filterTaxonomyId : null);
+        const effectiveTag = block.tagSlug || null;
+        const effectiveCollection = block.collectionId || 'articles';
+
+        let archiveUrl = effectiveCollection;
+        let archiveTitle = '';
+
+        if (effectiveTermId) {
+            const termRow = await db.select({
+                id: terms.id,
+                name: terms.name,
+                slug: terms.slug,
+                taxonomyId: terms.taxonomyId
+            }).from(terms).where(eq(terms.id, parseInt(effectiveTermId.toString()))).limit(1);
+
+            if (termRow.length > 0) {
+                archiveTitle = termRow[0].name;
+                const taxRow = await db.select({
+                    slug: taxonomies.slug,
+                    omitTaxonomySlug: taxonomies.omitTaxonomySlug
+                }).from(taxonomies).where(eq(taxonomies.id, termRow[0].taxonomyId)).limit(1);
+
+                if (taxRow.length > 0 && !taxRow[0].omitTaxonomySlug) {
+                    archiveUrl = `${taxRow[0].slug}/${termRow[0].slug}`;
+                } else {
+                    archiveUrl = termRow[0].slug;
+                }
+            }
+        } else if (effectiveTaxId) {
+            const taxRow = await db.select({
+                slug: taxonomies.slug,
+                label: taxonomies.label
+            }).from(taxonomies).where(eq(taxonomies.id, parseInt(effectiveTaxId.toString()))).limit(1);
+
+            if (taxRow.length > 0) {
+                archiveTitle = taxRow[0].label;
+                archiveUrl = taxRow[0].slug;
+            }
+        } else if (effectiveTag) {
+            archiveTitle = effectiveTag;
+            archiveUrl = `tag/${effectiveTag}`;
+        }
+
+        block.archiveUrl = archiveUrl;
+        block.categorySlug = archiveUrl;
+        if (!block.title && archiveTitle) {
+            block.title = archiveTitle;
+        }
+
         if (block.type === 'hero' || block.type === 'hero_2' || block.type === 'hero_3') {
-            blockData[block.id] = await fetchArticles({ limit: block.limit || 5 });
-        } else if (block.type === 'category_block') {
             blockData[block.id] = await fetchArticles({ 
-                categoryId: block.categoryId, 
-                filterTaxonomyId: block.filterTaxonomyId,
-                filterTermId: block.filterTermId,
-                limit: block.limit || 5, 
-                tagSlug: block.tagSlug 
+                limit: block.limit || 5,
+                collectionId: block.collectionId 
             });
-        } else if (block.type === 'category_block_2') {
+        } else if (block.type === 'category_block' || block.type === 'category_block_2') {
             blockData[block.id] = await fetchArticles({ 
                 categoryId: block.categoryId, 
-                filterTaxonomyId: block.filterTaxonomyId,
-                filterTermId: block.filterTermId,
-                limit: block.limit || 11, 
+                filterTaxonomyId: effectiveTaxId,
+                filterTermId: effectiveTermId,
+                filters: block.filters,
+                filterMatchType: block.filterMatchType,
+                collectionId: block.collectionId,
+                limit: block.limit || (block.type === 'category_block_2' ? 11 : 5), 
                 tagSlug: block.tagSlug 
             });
         } else if (block.type === 'categories_grid') {
             let priorityTax = block.taxonomySlug || 'categories';
-        if (priorityTax === 'all') {
-            const _allCols = await db.select().from(collections);
-            const allColsForTax = _allCols.filter((c: any) => {
-                const fields = safeJsonParse(c.fields || '[]', []);
-                return !fields.some((f: any) => f.slug === 'isBlockBuilder' || f.slug === 'is_block_builder');
-            });
-            priorityTax = 'categories';
-            for(const col of allColsForTax) {
-                const supports = safeJsonParse(col.supports || '{}', {});
-                if (supports.taxonomies && supports.taxonomies.length > 0) {
-                    priorityTax = supports.taxonomies[0];
-                    break;
+            if (priorityTax === 'all') {
+                const _allCols = await db.select().from(collections);
+                const allColsForTax = _allCols.filter((c: any) => {
+                    const fields = safeJsonParse(c.fields || '[]', []);
+                    return !fields.some((f: any) => f.slug === 'isBlockBuilder' || f.slug === 'is_block_builder');
+                });
+                priorityTax = 'categories';
+                for(const col of allColsForTax) {
+                    const supports = safeJsonParse(col.supports || '{}', {});
+                    if (supports.taxonomies && supports.taxonomies.length > 0) {
+                        priorityTax = supports.taxonomies[0];
+                        break;
+                    }
                 }
             }
-        }
-        const catTax = await db.select().from(taxonomies).where(eq(taxonomies.slug, priorityTax)).limit(1);
+            const catTax = await db.select().from(taxonomies).where(eq(taxonomies.slug, priorityTax)).limit(1);
             if (catTax.length > 0) {
                 blockData[block.id] = await db.select().from(terms).where(eq(terms.taxonomyId, catTax[0].id)).limit(block.limit || 12).offset(5);
             } else {
                 blockData[block.id] = [];
+            }
+        } else if (block.type === 'article_grid') {
+            // Client-side loading
+        } else {
+            // Generic handler for ANY other block component plugged into frontpage-blocks
+            if (block.limit || block.filters || block.collectionId) {
+                blockData[block.id] = await fetchArticles({
+                    filterTaxonomyId: effectiveTaxId,
+                    filterTermId: effectiveTermId,
+                    filters: block.filters,
+                    filterMatchType: block.filterMatchType,
+                    collectionId: block.collectionId,
+                    limit: block.limit || 6,
+                    tagSlug: block.tagSlug
+                });
             }
         }
     });

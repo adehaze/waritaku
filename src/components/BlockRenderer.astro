@@ -1,5 +1,6 @@
 ---
 import GlobalSidebar from './GlobalSidebar.astro';
+import { blockRegistry } from '../config/blockRegistry';
 
 const { layoutBlocks: rawLayoutBlocks, blockData = {}, showLeftSidebar = false, showRightSidebar = true } = Astro.props;
 const layoutBlocks = Array.isArray(rawLayoutBlocks) ? rawLayoutBlocks : [];
@@ -28,7 +29,8 @@ const layoutSections: any[] = [];
 let currentMainColumnGroup: any[] = [];
 const validBlocks = layoutBlocks.filter((b: any) => b && b.type);
 for (const block of validBlocks) {
-    const isMainColumn = block.type === 'category_block' || block.type === 'category_block_2';
+    const blockConfig = blockRegistry.find(b => b.type === block.type);
+    const isMainColumn = blockConfig ? blockConfig.group === 'MAIN COLUMN (66%)' : (block.type === 'category_block' || block.type === 'category_block_2');
     if (isMainColumn) {
         currentMainColumnGroup.push(block);
     } else {
@@ -60,17 +62,17 @@ if (currentMainColumnGroup.length > 0) {
                             const Component = Blocks[ComponentName];
                             if (!Component) return <div class="text-red-500">Block {ComponentName} not found</div>;
 
-                            const hasFilter = block.config?.targetTaxonomy || block.config?.targetTerm || block.tagSlug || block.categoryId;
-                            const archiveUrl = hasFilter 
-                                ? (block.tagSlug ? `tag/${block.tagSlug}` : (blockData[block.id]?.[0]?.categories?.[0]?.slug || 'category'))
-                                : (block.config?.targetCollection || 'articles');
+                            const rawUrl = block.archiveUrl || block.categorySlug || (blockData[block.id]?.[0]?.categorySlug && blockData[block.id][0].categorySlug !== 'all' ? blockData[block.id][0].categorySlug : null) || block.collectionId || 'articles';
+                            const archiveUrl = (rawUrl === 'all' ? (block.collectionId || 'articles') : rawUrl).replace(/^\/+/, '');
                             
                             return <Component 
                                 block={block}
                                 title={block.title || 'Category'} 
                                 categorySlug={archiveUrl} 
+                                archiveUrl={archiveUrl}
                                 articles={blockData[block.id] || []} 
                                 showExcerpt={block.showExcerpt} 
+                                {...block}
                             />;
                         })}
                     </div>
@@ -88,12 +90,17 @@ if (currentMainColumnGroup.length > 0) {
             
             if (!Component) return <div class="text-red-500">Block {ComponentName} not found ({block.type})</div>;
 
+            const rawUrl = block.archiveUrl || block.categorySlug || (blockData[block.id]?.[0]?.categorySlug && blockData[block.id][0].categorySlug !== 'all' ? blockData[block.id][0].categorySlug : null) || block.collectionId || 'articles';
+            const archiveUrl = (rawUrl === 'all' ? (block.collectionId || 'articles') : rawUrl).replace(/^\/+/, '');
+
             return (
                 <div class="w-full">
                     <Component 
                         block={block}
                         blockData={blockData}
                         articles={blockData[block.id] || []}
+                        categorySlug={archiveUrl}
+                        archiveUrl={archiveUrl}
                         {...block}
                     />
                 </div>

@@ -6,8 +6,8 @@ interface Props {
   articles: any[];
   showExcerpt?: boolean;
 }
-const { title, categorySlug, articles, showExcerpt = false } = Astro.props;
-
+const { title, categorySlug: rawCategorySlug, articles = [], showExcerpt = false } = Astro.props;
+const categorySlug = (rawCategorySlug || '').replace(/^\/+/, '');
 
 const featured = articles[0];
 const listArticles = articles.slice(1);
@@ -15,7 +15,12 @@ const listArticles = articles.slice(1);
 
 <section class="mb-12">
     <div class="flex items-center justify-between border-b-2 border-border pb-2 mb-6">
-        <h2 class="text-2xl font-extrabold uppercase tracking-tight border-l-4 border-primary pl-3 text-foreground">{title}</h2>
+        <h2 class="text-2xl font-extrabold uppercase tracking-tight border-l-4 border-primary pl-3 text-foreground">
+            <a href={`/${categorySlug}`} class="hover:text-primary transition-colors">{title}</a>
+        </h2>
+        <a href={`/${categorySlug}`} class="text-xs font-bold text-muted-foreground hover:text-primary transition-colors hidden sm:flex items-center gap-1">
+            Lihat Semua &raquo;
+        </a>
     </div>
 
     {featured && (
@@ -51,7 +56,7 @@ const listArticles = articles.slice(1);
                 </a>
                 <div class="flex-1 flex flex-col justify-start md:justify-center mt-1 md:mt-0">
                     <div class="flex items-center space-x-2 text-[9px] md:text-[10px] uppercase font-bold tracking-wider mb-1">
-                        <span class="text-primary truncate max-w-[120px] md:max-w-none">{article.categoryName}</span>
+                        <a href={`/${(article.categorySlug || categorySlug).replace(/^\/+/, '')}`} class="text-primary truncate max-w-[120px] md:max-w-none hover:underline">{article.categoryName}</a>
                         <span class="text-muted-foreground hidden md:inline">&bull; {article.authorName}</span>
                     </div>
                     <h4 class="text-xs md:text-sm font-bold leading-snug group-hover:text-primary transition-colors line-clamp-3 md:line-clamp-2">
