@@ -6,6 +6,53 @@ function safeJsonParse<T>(json: string | null | undefined, fallback: T): T {
     try { return JSON.parse(json); } catch { return fallback; }
 }
 
+/**
+ * Resolves standardized display fields (displayTitle, displayImage, displayExcerpt, displayContent)
+ * according to the collection's supports.mappings configuration.
+ */
+export function resolveEntryDisplayFields(
+    entry: any,
+    data: any,
+    collectionOrSupports: any,
+    fallbackExcerpt: string = ''
+) {
+    let supports: any = {};
+    if (collectionOrSupports) {
+        if (typeof collectionOrSupports.supports === 'string') {
+            supports = safeJsonParse(collectionOrSupports.supports, {});
+        } else if (typeof collectionOrSupports.supports === 'object' && collectionOrSupports.supports !== null) {
+            supports = collectionOrSupports.supports;
+        } else if (typeof collectionOrSupports === 'string') {
+            supports = safeJsonParse(collectionOrSupports, {});
+        } else if (typeof collectionOrSupports === 'object') {
+            supports = collectionOrSupports;
+        }
+    }
+    const mappings = (supports && supports.mappings) ? supports.mappings : {};
+
+    const rawContent = (mappings.contentField && data[mappings.contentField]) || data.content || '';
+    const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
+    const generatedExcerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
+
+    const displayTitle = (mappings.titleField && data[mappings.titleField]) || data.title || entry?.slug || '';
+    const displayImage = (mappings.imageField && data[mappings.imageField]) || data.featuredImageUrl || data.featuredImage || null;
+    const displayExcerpt = (mappings.excerptField && data[mappings.excerptField]) 
+        ? data[mappings.excerptField] 
+        : (data.excerpt || fallbackExcerpt || generatedExcerpt);
+    const displayContent = rawContent;
+
+    return {
+        displayTitle,
+        displayImage,
+        displayExcerpt,
+        displayContent,
+        excerpt: displayExcerpt,
+        title: displayTitle,
+        featuredImageUrl: displayImage || data.featuredImageUrl || null,
+        content: displayContent
+    };
+}
+
 // Shared edge-cached read of the collections table (10 min TTL).
 export async function getAllCollectionsCached(db: any): Promise<any[]> {
     const KEY = 'https://waritaku.internal/cache/all_collections';
@@ -270,6 +317,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
     const contentCollections = allCollections.filter((c: any) => c.slug !== 'pages');
     const contentCollectionIds = contentCollections.map((c: any) => c.id);
     const totalContentItems = contentCollections.reduce((sum: any, c: any) => sum + (c.entryCount || 0), 0);
+    const collectionById = new Map(allCollections.map((c: any) => [c.id, c]));
 
 
     // 0. Check Date Archive (e.g., 2025/03 or 2025/03/15) — WIB (UTC+7) aware
@@ -359,9 +407,8 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
 
         const categoryArticles = entriesResult.map((r: any) => {
             const data = safeJsonParse(r.entry.data, {} as any);
-            const rawContent = data.content || '';
-            const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
-            const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
+            const coll = collectionById.get(r.entry.collectionId);
+            const displayFields = resolveEntryDisplayFields(r.entry, data, coll);
             return {
                 id: r.entry.id,
                 slug: r.entry.slug,
@@ -370,7 +417,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 ...data,
                 authorName: r.author?.name || 'Writer',
                 categoryName: 'Article', // Can be enriched with terms
-                excerpt
+                ...displayFields
             };
         });
 
@@ -457,19 +504,17 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
 
         for (const r of articlesResult) {
             const data = safeJsonParse(r.entry.data, {} as any);
-            const rawContent = data.content || '';
-            const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
-            const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
-            
             const prefixSlug = canonicalMap[r.entry.id];
             const canonicalPath = prefixSlug ? `/${prefixSlug}/${r.entry.slug}` : `/${r.entry.slug}`;
             
-            let categoryName = 'Article';
+            let categoryName = collection.label || 'Article';
             const cats = categoryMap[r.entry.id] || [];
             if (cats.length > 0) {
                 const primary = data.primaryTermId ? cats.find((c: any) => c.id === data.primaryTermId) : null;
                 categoryName = primary ? primary.name : cats[0].name;
             }
+
+            const displayFields = resolveEntryDisplayFields(r.entry, data, collection);
 
             categoryArticles.push({
                 id: r.entry.id,
@@ -479,7 +524,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 ...data,
                 authorName: r.author?.name || 'Writer',
                 categoryName,
-                excerpt
+                ...displayFields
             });
         }
 
@@ -561,10 +606,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
 
             for (const r of articlesResult) {
                 const data = safeJsonParse(r.entry.data, {} as any);
-                const rawContent = data.content || '';
-                const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
-                const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
-                
+                const coll = collectionById.get(r.entry.collectionId);
                 const prefixSlug = canonicalMap[r.entry.id];
                 const canonicalPath = prefixSlug ? `/${prefixSlug}/${r.entry.slug}` : `/${r.entry.slug}`;
                 
@@ -575,6 +617,8 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                     categoryName = primary ? primary.name : cats[0].name;
                 }
                 
+                const displayFields = resolveEntryDisplayFields(r.entry, data, coll);
+
                 categoryArticles.push({
                     id: r.entry.id,
                     slug: r.entry.slug,
@@ -583,7 +627,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                     ...data,
                     authorName: r.author?.name || 'Writer',
                     categoryName,
-                    excerpt
+                    ...displayFields
                 });
             }
 
@@ -910,10 +954,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
         
         for (const r of articlesResult) {
             const data = safeJsonParse(r.entry.data, {} as any);
-            const rawContent = data.content || '';
-            const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
-            const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
-            
+            const coll = collectionById.get(r.entry.collectionId);
             const prefixSlug = canonicalMap[r.entry.id];
             const canonicalPath = prefixSlug ? `/${prefixSlug}/${r.entry.slug}` : `/${r.entry.slug}`;
 
@@ -924,6 +965,8 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 categoryName = primary ? primary.name : cats[0].name;
             }
 
+            const displayFields = resolveEntryDisplayFields(r.entry, data, coll);
+
             categoryArticles.push({
                 id: r.entry.id,
                 slug: r.entry.slug,
@@ -932,7 +975,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 ...data,
                 authorName: r.author?.name || 'Writer',
                 categoryName,
-                excerpt
+                ...displayFields
             });
         }
 
