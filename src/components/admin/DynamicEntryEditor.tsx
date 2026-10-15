@@ -24,7 +24,22 @@ interface DynamicEntryEditorProps {
     canChangeAuthor?: boolean;
 }
 
-export default function DynamicEntryEditor({ collectionSlug, schema, initialEntry, supports, taxonomies = [], taxonomyMeta = [], allUsers = [], canChangeAuthor = false }: DynamicEntryEditorProps) {
+export default function DynamicEntryEditor({ collectionSlug, schema: rawSchema, initialEntry, supports, taxonomies = [], taxonomyMeta = [], allUsers = [], canChangeAuthor = false }: DynamicEntryEditorProps) {
+    const schema = React.useMemo(() => {
+        if (!Array.isArray(rawSchema)) return [];
+        return rawSchema.map((f: any) => {
+            let type = f.type || 'text';
+            if (type === 'rich_content') type = 'richtext';
+            if (type === 'media') type = 'image';
+            return {
+                ...f,
+                name: f.name || f.slug || '',
+                label: f.label || f.name || f.slug || 'Field',
+                type
+            };
+        });
+    }, [rawSchema]);
+
     const defaultPrimaryTermId = React.useMemo(() => {
         try { if (supports) return JSON.parse(supports).defaultPrimaryTermId || null; } catch(e) {}
         return null;
