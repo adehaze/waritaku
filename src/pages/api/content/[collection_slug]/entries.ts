@@ -79,8 +79,14 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
         const total = countRes[0]?.count || 0;
 
         const results = await db.select({
-            entry: entries,
-            author: users
+            id: entries.id,
+            slug: entries.slug,
+            status: entries.status,
+            createdAt: entries.createdAt,
+            publishedAt: entries.publishedAt,
+            authorId: entries.authorId,
+            authorName: users.name,
+            title: sql<string>`coalesce(json_extract(${entries.data}, '$.title'), json_extract(${entries.data}, '$.name'), ${entries.slug})`,
         })
         .from(entries)
         .leftJoin(users, eq(entries.authorId, users.id))
@@ -90,7 +96,7 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
         .offset((page - 1) * limit);
 
         // Fetch terms for all returned entries
-        const entryIds = results.map(r => r.entry.id);
+        const entryIds = results.map(r => r.id);
         
         let allTerms: any[] = [];
         if (entryIds.length > 0) {
@@ -98,8 +104,10 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
             const { taxonomies } = await import('../../../../db/schema');
             allTerms = await db.select({
                 entryId: entryTerms.entryId,
-                term: terms,
-                taxonomy: taxonomies
+                termId: terms.id,
+                name: terms.name,
+                slug: terms.slug,
+                taxonomyLabel: taxonomies.label
             })
             .from(entryTerms)
             .innerJoin(terms, eq(entryTerms.termId, terms.id))
@@ -112,29 +120,25 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
         allTerms.forEach(t => {
             if (!termsByEntry[t.entryId]) termsByEntry[t.entryId] = [];
             termsByEntry[t.entryId].push({ 
-                id: t.term.id, 
-                name: t.term.name, 
-                slug: t.term.slug,
-                taxonomyLabel: t.taxonomy.label
+                id: t.termId, 
+                name: t.name, 
+                slug: t.slug,
+                taxonomyLabel: t.taxonomyLabel
             });
         });
 
-        const items = results.map(r => {
-            let parsedData: any;
-            try { parsedData = JSON.parse(r.entry.data || '{}'); } catch { parsedData = {}; }
-            const { password, ...safeData } = parsedData;
-            return {
-                id: r.entry.id,
-                slug: r.entry.slug,
-                status: r.entry.status,
-                createdAt: r.entry.createdAt,
-                publishedAt: r.entry.publishedAt,
-                authorName: r.author?.name || 'Unknown',
-                authorId: r.author?.id,
-                terms: termsByEntry[r.entry.id] || [],
-                ...safeData
-            };
-        });
+        const items = results.map(r => ({
+            id: r.id,
+            slug: r.slug,
+            title: r.title || r.slug,
+            name: r.title || r.slug,
+            status: r.status,
+            createdAt: r.createdAt,
+            publishedAt: r.publishedAt,
+            authorName: r.authorName || 'Unknown',
+            authorId: r.authorId,
+            terms: termsByEntry[r.id] || []
+        }));
 
         return new Response(JSON.stringify({ data: items, total, page, limit }), {
             status: 200,
