@@ -25,25 +25,125 @@ interface SchemaBuilderProps {
     availableTaxonomies: { slug: string, name: string }[];
 }
 
+const DEFAULT_SCHEMAS: Record<string, { fields: FieldSchema[]; supports: any }> = {
+    articles: {
+        fields: [
+            { name: 'title', label: 'Title', type: 'text', required: true },
+            { name: 'excerpt', label: 'Excerpt', type: 'textarea', required: false },
+            { name: 'content', label: 'Content', type: 'richtext', required: true },
+            { name: 'featuredImage', label: 'Featured Image', type: 'image', required: false },
+        ],
+        supports: {
+            revisions: true,
+            taxonomies: ['categories', 'tags'],
+            layoutBlocks: [
+                { id: 'block_hero', type: 'hero', config: {} },
+                { id: 'block_breadcrumbs', type: 'breadcrumbs', config: { visibility: 'hidden' } },
+                { id: 'block_body', type: 'body_content', config: {} },
+                { id: 'block_tags', type: 'taxonomy_terms', config: { targetTaxonomy: 'tags' } },
+                { id: 'block_related', type: 'related_items', config: { targetTaxonomy: 'categories' } },
+                { id: 'block_author', type: 'author_box', config: {} }
+            ],
+            mappings: {
+                titleField: 'title',
+                imageField: 'featuredImage',
+                excerptField: 'excerpt',
+                contentField: 'content'
+            }
+        }
+    },
+    pages: {
+        fields: [
+            { name: 'title', label: 'Title', type: 'text', required: true },
+            { name: 'is_block_builder', label: 'Use Block Builder', type: 'boolean', required: false, options: { default: true } },
+            { name: 'content', label: 'Content', type: 'richtext', required: false },
+            { name: 'layout_blocks', label: 'Layout Blocks', type: 'blockbuilder', required: false }
+        ],
+        supports: {
+            revisions: true,
+            layoutBlocks: [
+                { id: 'block_hero', type: 'hero', config: {} },
+                { id: 'block_breadcrumbs', type: 'breadcrumbs', config: { visibility: 'hidden' } },
+                { id: 'block_body', type: 'body_content', config: {} }
+            ],
+            mappings: {
+                titleField: 'title',
+                excerptField: '',
+                contentField: 'content'
+            }
+        }
+    }
+};
+
+function safeParseJson(val: any, fallback: any) {
+    if (!val) return fallback;
+    if (typeof val === 'object') return val;
+    try {
+        return JSON.parse(val);
+    } catch {
+        return fallback;
+    }
+}
+
+function normalizeFields(raw: any, collectionSlug?: string): FieldSchema[] {
+    let list: any[] = [];
+    if (Array.isArray(raw)) {
+        list = raw;
+    } else if (typeof raw === 'string') {
+        const parsed = safeParseJson(raw, null);
+        if (Array.isArray(parsed)) list = parsed;
+    }
+
+    if (list.length === 0 && collectionSlug && DEFAULT_SCHEMAS[collectionSlug]) {
+        return DEFAULT_SCHEMAS[collectionSlug].fields;
+    }
+
+    return list.map((f: any) => {
+        let type = f.type || 'text';
+        if (type === 'rich_content') type = 'richtext';
+        if (type === 'media') type = 'image';
+        return {
+            name: f.name || f.slug || `field_${Date.now()}`,
+            label: f.label || f.name || f.slug || 'Untitled Field',
+            type,
+            required: !!f.required,
+            options: f.options
+        };
+    });
+}
+
+function normalizeSupports(raw: any, collectionSlug?: string): any {
+    const parsed = safeParseJson(raw, {});
+    const hasKeys = parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0;
+    if (!hasKeys && collectionSlug && DEFAULT_SCHEMAS[collectionSlug]) {
+        return DEFAULT_SCHEMAS[collectionSlug].supports;
+    }
+    return parsed && typeof parsed === 'object' ? parsed : {};
+}
+
 export default function SchemaBuilder({ collection, availableTaxonomies }: SchemaBuilderProps) {
-    const [fields, setFields] = useState<FieldSchema[]>([]);
-    const [supports, setSupports] = useState<any>({});
+    const [fields, setFields] = useState<FieldSchema[]>(() => normalizeFields(collection.fields, collection.slug));
+    const [supports, setSupports] = useState<any>(() => normalizeSupports(collection.supports, collection.slug));
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState('');
     const [termsCache, setTermsCache] = useState<Record<string, any[]>>({});
 
+    const taxonomyKey = (supports?.taxonomies || []).join(',');
+
     useEffect(() => {
         const fetchTerms = async () => {
-            if (!supports?.taxonomies) return;
+            if (!supports?.taxonomies || supports.taxonomies.length === 0) return;
             const newCache = { ...termsCache };
             let updated = false;
             for (const taxSlug of supports.taxonomies) {
                 if (!newCache[taxSlug]) {
                     try {
-                        const res = await fetch(`/api/taxonomies/${taxSlug}/terms`);
+                        const res = await fetch(`/api/taxonomies/${taxSlug}/terms?limit=50`);
+                        if (!res.ok) continue;
                         const json = await res.json() as any;
-                        if (json.data) {
-                            newCache[taxSlug] = json.data;
+                        const termList = Array.isArray(json) ? json : (json?.data || []);
+                        if (termList.length > 0) {
+                            newCache[taxSlug] = termList;
                             updated = true;
                         }
                     } catch(e) {}
@@ -52,12 +152,12 @@ export default function SchemaBuilder({ collection, availableTaxonomies }: Schem
             if (updated) setTermsCache(newCache);
         };
         fetchTerms();
-    }, [supports?.taxonomies]);
+    }, [taxonomyKey]);
 
     useEffect(() => {
-        try { setFields(JSON.parse(collection.fields || '[]')); } catch(e) {}
-        try { setSupports(JSON.parse(collection.supports || '{}')); } catch(e) {}
-    }, [collection]);
+        setFields(normalizeFields(collection.fields, collection.slug));
+        setSupports(normalizeSupports(collection.supports, collection.slug));
+    }, [collection.fields, collection.supports, collection.slug]);
 
     const handleSave = async () => {
         setSaving(true);
