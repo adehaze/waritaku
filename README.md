@@ -13,8 +13,10 @@ The system uses Astro for server-side rendering and React for admin interfaces. 
 - **Taxonomy URL System**: Taxonomy archives support long format (`/taxonomy/term`) and short format (`/term`). Each taxonomy sets `entryUrlFormat` (long / short / none). Per-entry `primaryTermId` overrides the collection's taxonomy priority. The entry editor shows a live canonical URL preview.
 - **Adapter Pattern**: `src/lib/db.ts` (database adapter) and `src/lib/storage.ts` (storage adapter) prevent vendor lock-in. Swap D1→PostgreSQL or R2→S3 by editing one file.
 - **Media CDN Layer**: `src/lib/media.ts` centralizes media URLs. In production, `PUBLIC_MEDIA_BASE_URL` points to the R2 custom domain (for example, `https://r2.waritaku.com`). Media URLs redirect to the CDN with a 301. In local dev, the variable is empty and `/api/images/` serves as the proxy.
-- **R2 Render Cache**: Public HTML pages are served from an R2 bucket (`RENDER_CACHE` binding). On the first view, the page renders through SSR and writes the HTML to R2 in the background. Later views read the HTML from R2 with zero D1 queries. Admin and API paths bypass the cache. Cached pages use a one-year TTL; `invalidateCachedPage()` handles freshness on publish.
-- **Cache Invalidation**: `src/lib/cache-invalidation.ts` runs on entry publish/update. It deletes stale pages from R2 and purges Cloudflare's edge cache in parallel. It also self-fetches the new entry URL so the article renders into R2 immediately — no waiting for a visitor.
+- **R2 Render Cache**: Public HTML pages are served from an R2 bucket (`RENDER_CACHE` binding). On the first view, the page renders through SSR and writes the HTML to R2 in the background. Later views read the HTML from R2 with zero D1 queries. Admin and API paths bypass the cache. Cached pages use a one-year TTL. The function `invalidateCachedPage()` clears stale cache on publish.
+- **Cache Invalidation**: `src/lib/cache-invalidation.ts` runs when an author publishes or updates an entry. It deletes stale pages from R2 and purges Cloudflare edge cache in parallel. Pages re-render lazily on the next organic visitor request. The system avoids self-fetches to prevent race conditions against edge cache purge propagation.
+- **R2 Stored Sitemap Engine**: `src/lib/stored-response.ts` caches sitemaps (`/sitemap.xml`, `/sitemap-entries-[page].xml`, `/sitemap-terms.xml`) directly in R2. Sitemaps update every six hours. Search engine crawlers read sitemaps directly from R2 without consuming D1 read quotas.
+- **Postbuild Worker & CSS Hash Aliasing**: `scripts/cf-pages-postbuild.mjs` runs after `astro build`. It moves static assets into `dist/` and detects the active global CSS hash. It generates `dist/_worker.js` with fallback logic. If an R2-cached page requests an older CSS bundle, the worker issues an HTTP 307 redirect to the active stylesheet. Missing static assets return HTTP 404 plain text directly to prevent D1 queries. The worker also runs a scheduled task for D1 `PRAGMA optimize`.
 - **Date Archive Modes**: A settings toggle controls date archives (`/2026`, `/2026/08`, `/2026/08/10`). Four modes: `date` (all levels), `month` (year + month), `year` (year only), `off` (all date URLs return 404). When Off, date archive queries are skipped entirely and the calendar widget is hidden.
 - **Articles & Pages**: Rich content editing using the React TipTap WYSIWYG editor, custom image alignment, WordPress shortcodes (`[caption]` → `<figure>`, `[faq]` → `<details>`), auto Table of Contents, embed parsing, and revision history with atomic `version` increments.
 - **Categories & Tags**: Hierarchical taxonomies with search, sorting, and pagination (50/page) for taxonomies with 10k+ terms. Search matches both name and slug.
@@ -103,31 +105,40 @@ npx wrangler r2 bucket create waritaku-r1        # render cache (RENDER_CACHE bi
 ### 2. Configure Cloudflare Pages
 Connect your GitHub repository in the Cloudflare Dashboard to create a new Pages project.
 1. **Framework Preset**: Select `Astro` (Build command: `npm run build`, Output directory: `dist`).
-2. **Environment Variables**: Add `NODE_VERSION` with the value `20`. Add `PUBLIC_MEDIA_BASE_URL` with your R2 custom domain (for example, `https://r2.waritaku.com`). Leave it empty for local dev.
-3. **Save and Deploy**: The first deploy may fail or return a 500 error — this is expected because the database isn't bound yet.
+2. **Environment Variables**: Add `NODE_VERSION` with the value `22`. Add `PUBLIC_MEDIA_BASE_URL` with your R2 custom domain (for example, `https://r2.waritaku.com`). Leave it empty for local dev.
+3. **Save and Deploy**: The first deploy may return a 500 error before database bindings are attached. This is expected.
 
 ### 3. Bind the Database and Buckets
-1. Go to your Pages project in the Cloudflare Dashboard → **Settings** → **Functions** (or **Bindings**).
+1. Open your Pages project in Cloudflare Dashboard → **Settings** → **Bindings**.
 2. Under **D1 database bindings**, add a binding.
    - Variable name: `DB`
    - D1 database: select your `waritaku-d1` database.
 3. Under **R2 bucket bindings**, add two bindings.
    - Variable name: `UPLOADS` → `waritaku-uploads` bucket.
    - Variable name: `RENDER_CACHE` → `waritaku-r1` bucket.
-4. Retry the deployment in Cloudflare.
+4. Redeploy the project in Cloudflare.
 
-### 4. Push your Local Data to Production
-Your live database is currently empty. Push your local database structure and data to the live server.
-WordPress data dumps can be massive (20MB+), so standard Wrangler upload commands fail with a `SQLITE_TOOBIG` error. The repo includes a safe chunking script:
+### 4. Initialize Database for New Deployments
+The canonical database structure is defined in `drizzle/` migrations. The schema structure must stay identical across all instances. For new deployments, initialize the database using schema migrations or import an existing data dump.
+
+#### Option A: Apply Schema Migrations (New Clean Site)
+Run Drizzle migrations to create the standard table structure:
+```bash
+# Apply migrations to production D1
+npx wrangler d1 migrations apply waritaku-d1 --remote
+```
+
+#### Option B: Import Existing WordPress or Site Dump
+To populate a new site from an existing database dump, use the chunking script. WordPress data dumps often exceed Cloudflare limits (20MB+), causing `SQLITE_TOOBIG` errors. The chunking script processes records safely:
 
 ```bash
-# 1. Export your local database to a dump file
+# 1. Export your source database to a dump file
 sqlite3 local.db .dump > local-dump.sql
 
 # 2. Run the chunking upload script
 node scripts/push_d1_chunks.mjs
 ```
-*(If the script pauses, update `push_d1_chunks.mjs` to target your specific production database name).*
+*(Update `push_d1_chunks.mjs` if your production database has a custom name).*
 
 ### 5. Push your Media
 Run the R2 Sync utility to upload all local images to your live bucket:
@@ -139,16 +150,14 @@ npm run push:media
 
 Cloudflare D1 has built-in Point-in-Time Recovery (Time Travel). Time Travel keeps a continuous backup of the database for 30 days. You can restore the database to any minute in that time.
 
-This repository also includes a GitHub Actions workflow to create an off-platform backup. The workflow creates a standard `.sql` file. Use this file if you must migrate to a different database provider.
+This repository provides a sample GitHub Actions workflow at `.github/workflows/d1-backup.sample-yml`. To activate automated daily backups:
 
-The workflow runs every day at 2:00 AM UTC. It exports the database and uploads the file to your `waritaku-uploads` R2 bucket in the `/backups/` folder.
+1. Rename `.github/workflows/d1-backup.sample-yml` to `.github/workflows/d1-backup.yml`.
+2. Add these repository secrets:
+   - `CLOUDFLARE_API_TOKEN`: Cloudflare API token with D1 read and R2 write permissions.
+   - `CLOUDFLARE_ACCOUNT_ID`: Your Cloudflare Account ID.
 
-To enable the automated backups, add these secrets to your GitHub repository:
-
-1. `CLOUDFLARE_API_TOKEN`: A Cloudflare API token with D1 read permissions and R2 write permissions.
-2. `CLOUDFLARE_ACCOUNT_ID`: Your Cloudflare Account ID.
-
-You can also start the backup manually from the GitHub Actions tab.
+When enabled, the workflow runs every day at 2:00 AM UTC. It exports the database and uploads the `.sql` backup to your `waritaku-uploads` R2 bucket in `/backups/`. You can also trigger the backup manually from the GitHub Actions tab.
 
 ## Development Commands
 
@@ -157,18 +166,18 @@ You can also start the backup manually from the GitHub Actions tab.
 | `npm run setup` | Launches the interactive Setup & Migration CLI Wizard |
 | `npm run push:media` | Syncs your local_uploads folder to Cloudflare R2 |
 | `npm install` | Installs project dependencies |
-| `npx wrangler d1 migrations apply DB --local` | Applies schema changes to the local D1 database |
+| `npx wrangler d1 migrations apply DB --local` | Applies schema migrations to initialize clean local D1 database |
 | `npm run dev` | Starts local dev server at `localhost:4321` |
-| `npm run dev --remote` | Starts dev server using remote Cloudflare D1 database |
-| `npm run build` | Builds production output to `./dist/` |
+| `npx astro dev --background` | Starts dev server in background mode |
+| `npm run build` | Builds production output and generates postbuild worker |
 | `npm run check` | Runs Astro type-checking (`astro check`) |
-| `node scripts/prewarm.mjs` | Warms the R2 render cache for all published entries + categories |
+| `node scripts/prewarm.mjs` | Warms the R2 render cache for published entries and categories |
 
 ## Development Rules
 
-- **Database Rule**: Do not wipe, delete, or recreate the database folder (`.wrangler`) unless explicitly authorized.
-- **Database Concurrency**: Never run heavy SQLite updates in a loop (e.g. `syncCounts`). The `better-sqlite3` driver will block the Node.js event loop and freeze the dev server. Use raw SQLite bulk updates (e.g. `db.run(sql)`) instead.
-- **Migration Rule**: NEVER run `wrangler d1 migrations apply --local` blindly. If the `d1_migrations` table is empty or missing, Wrangler may forcefully wipe the local database to apply migrations from scratch, causing total data loss. Always verify state first (`scripts/setup.mjs` includes a pre-flight safety check).
+- **Database Preservation**: NEVER wipe, delete, or recreate any database (not `.wrangler` nor any replica) unless explicitly requested.
+- **Database Concurrency**: Never run heavy SQLite updates in a loop. Use raw SQLite bulk updates instead.
+- **Migration Caution**: Do not run migrations blindly on existing databases with content. Always check `d1_migrations` state first. For new site deployments, apply the migrations from `drizzle/` to maintain a consistent schema.
 - **Data Integrity**: Do not insert arbitrary or fake data into the database.
-- **Security**: Never commit `.env`, `.dev.vars`, or `local.db`. Keep `JWT_SECRET` out of source control.
-- **Writing Standard**: All documentation prose follows ASD-STE100 Simplified Technical English (STE-flavored rules).
+- **Security**: Never commit `.env`, `.dev.vars`, or database dump files. Keep `JWT_SECRET` out of source control.
+- **Writing Standard**: All documentation prose follows ASD-STE100 Simplified Technical English.
