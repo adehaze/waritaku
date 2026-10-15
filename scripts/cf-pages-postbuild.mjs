@@ -48,8 +48,9 @@ export default {
       return Response.redirect(targetUrl.toString(), 307);
     }
 
-    // 2. Stop missing static assets from falling through to Astro catch-all slug route or D1 queries
-    if (url.pathname.startsWith('/_astro/') || /\\.(css|js|map|png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|eot|ico)$/i.test(url.pathname)) {
+    // 2. Stop missing Astro bundle assets from falling through to Astro catch-all slug route or D1 queries.
+    // NOTE: Never intercept /uploads/ or /api/ here — those are dynamic endpoints!
+    if (url.pathname.startsWith('/_astro/')) {
       return new Response('Not Found', {
         status: 404,
         headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=3600' }
