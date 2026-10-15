@@ -45,6 +45,7 @@ export default function EntriesTable({
     const [dateFilter, setDateFilter] = useState('');
     const [termFilter, setTermFilter] = useState('');
     const [availableTerms, setAvailableTerms] = useState<any[]>([]);
+    const [fetchError, setFetchError] = useState<string | null>(null);
     // Per-row purge state: null | 'loading' | 'success' | 'error'
     const [purgeState, setPurgeState] = useState<Record<number, string>>({});
 
@@ -55,14 +56,18 @@ export default function EntriesTable({
         const fetchTerms = async () => {
             try {
                 const res = await fetch(`/api/taxonomy-builder`);
+                if (!res.ok) return;
                 const taxonomies = await res.json() as any[];
+                if (!Array.isArray(taxonomies)) return;
                 const termsList: any[] = [];
                 for (const tax of taxonomies) {
                     try {
                         const allowed = JSON.parse(tax.allowedCollections || '[]');
                         if (allowed.includes(collectionSlug)) {
-                            const termRes = await fetch(`/api/taxonomies/${tax.slug}/terms`);
-                            const terms = await termRes.json() as any[];
+                            const termRes = await fetch(`/api/taxonomies/${tax.slug}/terms?limit=100`);
+                            if (!termRes.ok) continue;
+                            const termJson = await termRes.json() as any;
+                            const terms = Array.isArray(termJson) ? termJson : (termJson?.data || []);
                             terms.forEach((t: any) => {
                                 termsList.push({ ...t, taxName: tax.label });
                             });
@@ -81,22 +86,43 @@ export default function EntriesTable({
 
     const fetchData = async () => {
         setLoading(true);
+        setFetchError(null);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000); // 15-second timeout safeguard
+
         try {
             let url = `/api/content/${collectionSlug}/entries?page=${page}&limit=${limit}&search=${encodeURIComponent(search)}`;
             if (statusFilter) url += `&status=${statusFilter}`;
             if (dateFilter) url += `&date=${dateFilter}`;
             if (termFilter) url += `&termId=${termFilter}`;
             
-            const res = await fetch(url);
+            const res = await fetch(url, { signal: controller.signal });
+            clearTimeout(timeoutId);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({}));
+                throw new Error(errData.error || `Server returned status ${res.status}`);
+            }
             const json = await res.json() as any;
             if (json.data) {
                 setEntries(json.data);
-                setTotal(json.total);
+                setTotal(json.total || 0);
+            } else {
+                setEntries([]);
+                setTotal(0);
             }
-        } catch (e) {
+        } catch (e: any) {
             console.error(e);
+            if (e.name === 'AbortError') {
+                setFetchError('Request timed out. The database is taking too long to respond.');
+            } else {
+                setFetchError(e.message || 'Failed to load entries.');
+            }
+            setEntries([]);
+            setTotal(0);
+        } finally {
+            clearTimeout(timeoutId);
+            setLoading(false);
         }
-        setLoading(false);
     };
 
     const handleDelete = async (id: number) => {
@@ -210,7 +236,22 @@ export default function EntriesTable({
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-border">
-                        {entries.length === 0 && !loading && (
+                        {fetchError && !loading && (
+                            <tr>
+                                <td colSpan={6} className="px-6 py-8 text-center">
+                                    <div className="flex flex-col items-center justify-center gap-2">
+                                        <p className="text-sm font-medium text-destructive">❌ {fetchError}</p>
+                                        <button 
+                                            onClick={() => fetchData()} 
+                                            className="px-3 py-1.5 bg-primary text-primary-foreground hover:bg-primary/90 text-xs font-semibold rounded-md transition-colors shadow-sm"
+                                        >
+                                            Retry
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                        )}
+                        {!fetchError && entries.length === 0 && !loading && (
                             <tr>
                                 <td colSpan={6} className="px-6 py-8 text-center text-muted-foreground">
                                     No entries found.
