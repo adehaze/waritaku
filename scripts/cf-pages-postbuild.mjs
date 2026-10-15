@@ -48,10 +48,10 @@ export default {
       return Response.redirect(targetUrl.toString(), 307);
     }
 
-    // 2. Serve static assets via Cloudflare Pages ASSETS binding
-    if (env && env.ASSETS) {
+    // 2. Serve static assets via Cloudflare Pages ASSETS binding (GET/HEAD only)
+    if (env && env.ASSETS && (request.method === 'GET' || request.method === 'HEAD')) {
       const asset = await env.ASSETS.fetch(request);
-      if (asset.status !== 404) {
+      if (asset.status < 400) {
         return asset;
       }
     }

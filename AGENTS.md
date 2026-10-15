@@ -75,3 +75,20 @@ Consult these guides before working on related tasks:
 - [Adding or managing content](https://docs.astro.build/en/guides/content-collections/)
 - [Adding styles or using Tailwind](https://docs.astro.build/en/guides/styling/)
 - [Supporting multiple languages](https://docs.astro.build/en/guides/internationalization/)
+
+## Architectural Rules - No Hardcoding
+- **CRITICAL CMS RULE:** Never hardcode collection slugs (rticles, pages), taxonomy slugs (categories, 	ags), or content field names (	itle, content, eaturedImageUrl) into frontend rendering logic, queries, or middleware.
+- **Dynamic Schema Enforcement:** This is a Headless CMS with a dynamic Content Type Builder. Any bug fixes or new features must query the database schema or configuration settings dynamically. If you need to know what collection a page belongs to, look it up by ID/slug dynamically. If you need to render a title or excerpt, use dynamic field fallbacks or schema definitions, NOT hardcoded property names.
+- **NEVER PATCH WITH HARDCODING:** If you encounter a bug, do not solve it by writing if (slug === 'categories'). Solve it by addressing the underlying dynamic routing logic.
+
+## Architectural Rules - Schema Mapping Principle
+- **UNACCEPTABLE (Goblin Tech):** Never try to guess or use regex/fallbacks to determine which dynamic field (e.g., ield_12345) represents the Title, Featured Image, or Excerpt in a collection. Never write logic that iterates over JSON keys hoping to find something named "image" or "title".
+- **ACCEPTABLE:** The system must rely strictly on explicit Field Mappings defined in the collection's supports.mappings JSON configuration. If a collection needs to display a title or image on an archive card, it must look up the exact field key (e.g., mappings.titleField) assigned by the user in the Content Type Builder UI, and extract the data deterministically using that key.
+- **Taxonomy Priority:** When resolving URLs for entries that belong to multiple taxonomies, never pick a taxonomy at random. The system MUST respect the explicit priority order defined in the supports.taxonomies array configured in the builder.
+
+## Agent Behavioral Rules - Context & Focus
+- **NEVER READ OLD LOGS:** Do not actively search for, grep, or read old .txt, .log, or deleted inspection files to try and guess what the user meant. If the user gives an instruction, take it at face value.
+- **NO PAST CONTEXT OBSESSION:** Do not try to resurrect old context or derail the conversation by bringing up logs or issues that the user has already marked as solved or deleted. Focus ONLY on the active, current markdown plan.
+
+- **DEPLOYMENT ASSUMPTION RULE:** The user commits and deploys through GitHub and Cloudflare, not from this local folder. Local git status will show uncommitted files even after the user deployed. When you cannot see the GitHub changes, ALWAYS assume the user already committed and deployed them. NEVER ask the user to prove it. NEVER suggest that a change might not be deployed. Look for a different cause.
+- **D1 LIMIT RULE:** The user is on the D1 free tier and often exceeds the daily read limit. HTTP 500 errors with failed D1 queries are expected after the limit. Do not raise this again. The user already knows.
