@@ -503,8 +503,11 @@ if (Astro.request.method === 'POST') {
     </div>
 
     {/* ── WordPress Import UI ─────────────────────────────────────────────── */}
+    <div id="wp-import-data" data-collections={JSON.stringify(allCollections)} class="hidden"></div>
     <script>
     (function () {
+      const collectionsData = document.getElementById('wp-import-data')?.getAttribute('data-collections');
+      const collectionsList: any[] = collectionsData ? JSON.parse(collectionsData) : [];
       const fileInput = document.getElementById('wp-import-file') as HTMLInputElement;
       const importBtn = document.getElementById('wp-import-btn') as HTMLButtonElement;
       const resetBtn = document.getElementById('wp-import-reset');

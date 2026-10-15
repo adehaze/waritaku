@@ -19,7 +19,7 @@ export const GET: APIRoute = async ({ request }) => {
     // stays DYNAMIC). We must use caches.default explicitly so D1 is only hit
     // once per day per unique param combination (tax + terms + limit).
     const CF_CACHE_TTL = 86400; // 24 hours
-    const cfCache = (typeof caches !== 'undefined') ? caches.default : null;
+    const cfCache = (typeof caches !== 'undefined') ? (caches as any).default : null;
     const cacheKey = new Request(url.toString(), { method: 'GET' });
 
     if (cfCache) {

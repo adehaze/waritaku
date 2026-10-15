@@ -52,7 +52,7 @@ if (db) {
         } catch(e) { return false; }
     }).map(c => c.id);
 
-    let results = [];
+    let results: any[] = [];
     if (blockBuilderColIds.length > 0) {
         results = await db.select().from(entries).where(inArray(entries.collectionId, blockBuilderColIds));
     }

@@ -31,6 +31,11 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
             return new Response(JSON.stringify({ error: 'Collection not found' }), { status: 404 });
         }
         const collectionId = colRes[0].id;
+        const supports = typeof colRes[0].supports === 'string'
+            ? JSON.parse(colRes[0].supports || '{}')
+            : (colRes[0].supports || {});
+        const mappedTitleField = (supports?.mappings?.titleField || '').replace(/[^a-zA-Z0-9_-]/g, '');
+        const titlePath = mappedTitleField ? `$.${mappedTitleField}` : '$.title';
 
         let conditions: any = eq(entries.collectionId, collectionId);
         
@@ -86,7 +91,7 @@ export const GET: APIRoute = async ({ request, params, locals }) => {
             publishedAt: entries.publishedAt,
             authorId: entries.authorId,
             authorName: users.name,
-            title: sql<string>`coalesce(json_extract(${entries.data}, '$.title'), json_extract(${entries.data}, '$.name'), ${entries.slug})`,
+            title: sql<string>`coalesce(json_extract(${entries.data}, ${titlePath}), json_extract(${entries.data}, '$.title'), ${entries.slug})`,
         })
         .from(entries)
         .leftJoin(users, eq(entries.authorId, users.id))
