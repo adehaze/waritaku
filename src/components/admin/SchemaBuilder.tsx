@@ -121,9 +121,9 @@ function normalizeSupports(raw: any, collectionSlug?: string): any {
     return parsed && typeof parsed === 'object' ? parsed : {};
 }
 
-export default function SchemaBuilder({ collection, availableTaxonomies }: SchemaBuilderProps) {
-    const [fields, setFields] = useState<FieldSchema[]>(() => normalizeFields(collection.fields, collection.slug));
-    const [supports, setSupports] = useState<any>(() => normalizeSupports(collection.supports, collection.slug));
+export default function SchemaBuilder({ collection, availableTaxonomies = [] }: SchemaBuilderProps) {
+    const [fields, setFields] = useState<FieldSchema[]>(() => normalizeFields(collection?.fields, collection?.slug));
+    const [supports, setSupports] = useState<any>(() => normalizeSupports(collection?.supports, collection?.slug));
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState('');
     const [termsCache, setTermsCache] = useState<Record<string, any[]>>({});
@@ -155,9 +155,11 @@ export default function SchemaBuilder({ collection, availableTaxonomies }: Schem
     }, [taxonomyKey]);
 
     useEffect(() => {
-        setFields(normalizeFields(collection.fields, collection.slug));
-        setSupports(normalizeSupports(collection.supports, collection.slug));
-    }, [collection.fields, collection.supports, collection.slug]);
+        if (collection) {
+            setFields(normalizeFields(collection.fields, collection.slug));
+            setSupports(normalizeSupports(collection.supports, collection.slug));
+        }
+    }, [collection?.fields, collection?.supports, collection?.slug]);
 
     const handleSave = async () => {
         setSaving(true);

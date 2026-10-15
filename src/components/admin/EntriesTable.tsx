@@ -277,9 +277,9 @@ export default function EntriesTable({
                                 <td className="px-6 py-4 whitespace-nowrap">
                                     <div className="flex items-center gap-2">
                                         <div className="w-6 h-6 rounded-full bg-primary/20 text-primary flex items-center justify-center text-[10px] font-bold">
-                                            {entry.authorName.charAt(0).toUpperCase()}
+                                            {(entry.authorName || 'U').charAt(0).toUpperCase()}
                                         </div>
-                                        {entry.authorName}
+                                        {entry.authorName || 'Unknown'}
                                     </div>
                                 </td>
                                 <td className="px-6 py-4 whitespace-nowrap">
@@ -288,7 +288,7 @@ export default function EntriesTable({
                                     </span>
                                 </td>
                                 <td className="px-6 py-4 text-muted-foreground whitespace-nowrap text-xs">
-                                    {new Date(entry.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}
+                                    {entry.publishedAt ? new Date(entry.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '-'}
                                 </td>
                                 <td className="px-6 py-4">
                                     <div className="flex flex-col gap-2 max-w-[250px]">

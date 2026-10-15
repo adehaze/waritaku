@@ -45,5 +45,5 @@ const availableTaxonomies = allTaxonomies.map(t => ({ slug: t.slug, name: t.labe
     </div>
 
     <!-- The React Root for Schema Builder -->
-    <SchemaBuilder client:only="react" collection={collection} availableTaxonomies={availableTaxonomies} />
+    <SchemaBuilder client:load collection={collection} availableTaxonomies={availableTaxonomies} />
 </AdminLayout>
