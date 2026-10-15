@@ -16,7 +16,7 @@ export async function serveStoredResponse(
     key: string,
     ttlSeconds: number,
     contentType: string,
-    build: () => Promise<Response>,
+    build: () => Response | Promise<Response>,
     ctx?: { waitUntil?: (p: Promise<any>) => void }
 ): Promise<Response> {
     const bucket = env?.RENDER_CACHE;
