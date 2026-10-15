@@ -27,6 +27,14 @@ if (!rawSlug) {
     rawSlug = rawSlug.replace(/\/$/, '');
 }
 
+// Return 404 for missing static assets without querying D1 or redirecting to /404 HTML
+if (rawSlug && (rawSlug.startsWith('_astro/') || /\.(css|js|map|png|jpg|jpeg|gif|svg|webp|woff|woff2|ttf|eot|ico)$/i.test(rawSlug))) {
+    return new Response('Not Found', {
+        status: 404,
+        headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=3600' }
+    });
+}
+
 let currentPage = 1;
 const pageMatch = rawSlug.match(/^(.*?)\/page\/(\d+)$/i);
 if (pageMatch) {
