@@ -6,6 +6,7 @@ import { eq, sql } from 'drizzle-orm';
 import { getCachedPage, cacheRenderedPage, isBypassRequest } from './lib/render-cache';
 import { loadUserPermissions } from './lib/permissions';
 import { useTranslation } from './i18n';
+import { env } from 'cloudflare:workers';
 
 // Paths that must never be served from the R2 render cache.
 // Static file extensions are matched by the dot check further below.
@@ -21,22 +22,38 @@ function isPublicHtmlPath(pathname: string): boolean {
     return true;
 }
 
-// CF Cache API helpers — replaces module-level in-memory caches.
-// Module-level JS variables die with each CF isolate restart.
-// caches.default persists across restarts within the same CF PoP.
-const SETTINGS_CACHE_TTL = 300;   // 5 minutes
-const REDIRECTS_CACHE_TTL = 300;  // 5 minutes
+const SETTINGS_CACHE_TTL = 600;   // 10 minutes
+const REDIRECTS_CACHE_TTL = 600;  // 10 minutes
 const SETTINGS_CACHE_KEY = 'https://waritaku.internal/cache/general_settings';
 const REDIRECTS_CACHE_KEY = 'https://waritaku.internal/cache/redirects';
 
-async function getCfCacheJson(key) {
+let _memSettings: { data: any; ts: number } | null = null;
+let _memRedirects: { data: any; ts: number } | null = null;
+
+function isZeroDbPublicRoute(pathname: string): boolean {
+    if (
+        pathname.startsWith('/uploads/') ||
+        pathname.startsWith('/_astro/') ||
+        pathname.startsWith('/api/widgets/') ||
+        pathname === '/robots.txt' ||
+        pathname === '/ads.txt' ||
+        pathname === '/llms.txt' ||
+        pathname === '/llms-full.txt' ||
+        (pathname.startsWith('/sitemap') && pathname.endsWith('.xml'))
+    ) {
+        return true;
+    }
+    return false;
+}
+
+async function getCfCacheJson(key: string) {
     if (typeof caches === 'undefined') return null;
     const res = await caches.default.match(new Request(key));
     if (!res) return null;
     try { return await res.json(); } catch { return null; }
 }
 
-function setCfCacheJson(key, data, ttl) {
+function setCfCacheJson(key: string, data: any, ttl: number) {
     if (typeof caches === 'undefined') return;
     const res = new Response(JSON.stringify(data), {
         headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=' + ttl }
@@ -44,23 +61,25 @@ function setCfCacheJson(key, data, ttl) {
     caches.default.put(new Request(key), res).catch(() => {});
 }
 
-import { env } from 'cloudflare:workers';
-
 export const onRequest = defineMiddleware(async (context, next) => {
     const url = new URL(context.request.url);
 
-    
     // 1. Force trailing slash redirect (except root)
     if (url.pathname !== '/' && url.pathname.endsWith('/')) {
         url.pathname = url.pathname.slice(0, -1);
         return context.redirect(url.toString(), 301);
     }
 
-
     // --- Intercept legacy WP /feed URLs ---
     if (url.pathname.endsWith('/feed') || url.pathname.endsWith('/feed/')) {
         const cleanPath = url.pathname.replace(/\/feed\/?$/, '');
         return context.redirect(cleanPath || '/', 301);
+    }
+
+    // Fast-path for uploads, static assets, edge-cached widgets, and stored sitemaps/txt files:
+    // Never touch D1 in middleware for these paths.
+    if (isZeroDbPublicRoute(url.pathname)) {
+        return next();
     }
 
     // --- R2 Render Cache short-circuit ---
@@ -92,21 +111,34 @@ export const onRequest = defineMiddleware(async (context, next) => {
         return new Response(`${errorMsg}\n\n${padding}`, { status: 500, headers: { 'Content-Type': 'text/plain' }});
     }
 
+    const isApiRoute = url.pathname.startsWith('/api');
+    const isAdminRoute = url.pathname.startsWith('/admin');
+
     let enableRedirections = true;
     let enable404Tracking = true;
     let generalSettings: any = null;
 
-    if (db) {
-        // Try CF edge cache first — avoids D1 on every request
-        generalSettings = await getCfCacheJson(SETTINGS_CACHE_KEY);
+    // API routes do not use generalSettings, i18n, or URL redirects
+    if (db && !isApiRoute) {
+        if (_memSettings && Date.now() - _memSettings.ts < SETTINGS_CACHE_TTL * 1000) {
+            generalSettings = _memSettings.data;
+        } else {
+            generalSettings = await getCfCacheJson(SETTINGS_CACHE_KEY);
+            if (generalSettings) {
+                _memSettings = { data: generalSettings, ts: Date.now() };
+            }
+        }
         if (!generalSettings) {
             try {
                 const configRow = await db.select().from(settings).where(eq(settings.key, 'general_settings')).get();
                 if (configRow) {
                     generalSettings = JSON.parse(configRow.value);
+                    _memSettings = { data: generalSettings, ts: Date.now() };
                     setCfCacheJson(SETTINGS_CACHE_KEY, generalSettings, SETTINGS_CACHE_TTL);
                 }
-            } catch(e) {}
+            } catch(e) {
+                generalSettings = _memSettings?.data || null;
+            }
         }
         if (generalSettings) {
             enableRedirections = generalSettings.enableRedirections !== false;
@@ -119,10 +151,17 @@ export const onRequest = defineMiddleware(async (context, next) => {
     const language = generalSettings?.language || 'id';
     context.locals.t = useTranslation(language);
 
-    // --- 0. Redirect Engine ---
-    if (db && enableRedirections) {
-        // Try CF edge cache first — avoids D1 on every request
-        let redirectMap = await getCfCacheJson(REDIRECTS_CACHE_KEY);
+    // --- 0. Redirect Engine (Public non-admin, non-API routes only) ---
+    if (db && enableRedirections && !isApiRoute && !isAdminRoute) {
+        let redirectMap: any = null;
+        if (_memRedirects && Date.now() - _memRedirects.ts < REDIRECTS_CACHE_TTL * 1000) {
+            redirectMap = _memRedirects.data;
+        } else {
+            redirectMap = await getCfCacheJson(REDIRECTS_CACHE_KEY);
+            if (redirectMap) {
+                _memRedirects = { data: redirectMap, ts: Date.now() };
+            }
+        }
         if (!redirectMap) {
             try {
                 const allRedirects = await db.select().from(redirects).all();
@@ -130,10 +169,11 @@ export const onRequest = defineMiddleware(async (context, next) => {
                 for (const r of allRedirects) {
                     redirectMap[r.sourceUrl] = r;
                 }
+                _memRedirects = { data: redirectMap, ts: Date.now() };
                 setCfCacheJson(REDIRECTS_CACHE_KEY, redirectMap, REDIRECTS_CACHE_TTL);
             } catch (e) {
                 console.error('Failed to fetch redirects cache', e);
-                redirectMap = {};
+                redirectMap = _memRedirects?.data || {};
             }
         }
         
@@ -159,11 +199,12 @@ export const onRequest = defineMiddleware(async (context, next) => {
 
     // 2. Protect /admin and /api routes (except public auth routes)
     const publicAdminRoutes = ['/admin/login', '/admin/forgot-password', '/admin/reset-password'];
-    if ((url.pathname.startsWith('/admin') && !publicAdminRoutes.includes(url.pathname)) || url.pathname.startsWith('/api')) {
+    const publicApiAuthRoutes = ['/api/auth/login', '/api/auth/logout', '/api/auth/forgot-password', '/api/auth/reset-password'];
+    if ((isAdminRoute && !publicAdminRoutes.includes(url.pathname)) || (isApiRoute && !publicApiAuthRoutes.includes(url.pathname))) {
         const sessionCookie = context.cookies.get('session')?.value;
         
         if (!sessionCookie) {
-            if (url.pathname.startsWith('/api')) {
+            if (isApiRoute) {
                 // Let the API route handle the missing user context (it will see locals.user is undefined)
             } else {
                 return context.redirect('/admin/login', 302);
@@ -181,7 +222,7 @@ export const onRequest = defineMiddleware(async (context, next) => {
                 context.locals.permissions = await loadUserPermissions(db, payload.role);
             } else {
                 context.cookies.delete('session', { path: '/' });
-                if (url.pathname.startsWith('/api')) {
+                if (isApiRoute) {
                     return new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 });
                 }
                 return context.redirect('/admin/login', 302);

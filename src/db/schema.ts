@@ -92,7 +92,7 @@ export const entries = sqliteTable('entries', {
   statusIdx: index('entries_status_idx').on(t.status),
   collectionIdx: index('entries_collection_idx').on(t.collectionId),
   authorIdx: index('entries_author_idx').on(t.authorId),
-  authorCollectionStatusIdx: index('entries_author_collection_status_idx').on(t.authorId, t.collectionId, t.status),
+  authorCollectionStatusIdIdx: index('entries_author_collection_status_id_idx').on(t.authorId, t.collectionId, t.status, t.id),
   compositeSortIdx: index('entries_collection_status_published_idx').on(t.collectionId, t.status, t.publishedAt),
   collectionStatusIdIdx: index('entries_collection_status_id_idx').on(t.collectionId, t.status, t.id),
   statusIdIdx: index('entries_status_id_idx').on(t.status, t.id),
@@ -146,7 +146,7 @@ export const entryTerms = sqliteTable('entry_terms', {
   termId: integer('term_id').references(() => terms.id, { onDelete: 'cascade' }).notNull(),
 }, (t) => ({
   pk: primaryKey({ columns: [t.entryId, t.termId] }),
-  termIdx: index('entry_terms_term_idx').on(t.termId),
+  termEntryIdx: index('entry_terms_term_entry_idx').on(t.termId, t.entryId),
 }));
 
 export const passwordResets = sqliteTable('password_resets', {

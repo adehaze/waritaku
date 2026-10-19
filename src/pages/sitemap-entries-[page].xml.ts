@@ -1,9 +1,9 @@
 import type { APIRoute } from 'astro';
-import { entries, collections, settings } from '../db/schema';
-import { eq, desc, and, inArray, sql } from 'drizzle-orm';
+import { entries } from '../db/schema';
+import { eq, desc, and, inArray } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
-import { getCanonicalUrls } from '../lib/queries';
+import { getCanonicalUrls, getAllCollectionsCached, getGeneralSettingsCached } from '../lib/queries';
 import { serveStoredResponse, SITEMAP_PAGE_SIZE } from '../lib/stored-response';
 
 // Stored in R2 for 24 hours. Deep OFFSET queries are expensive on D1 and crawlers
@@ -23,67 +23,89 @@ const buildSitemapPage: APIRoute = async ({ params, request }) => {
     let siteUrl = new URL(request.url).origin;
     let sitemapCollections: string[] | null = null;
     
-    const settingsRec = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-    if (settingsRec.length > 0) {
-        try {
-            const parsed = JSON.parse(settingsRec[0].value);
-            if (parsed.siteUrl) siteUrl = parsed.siteUrl;
-            if (parsed.sitemapCollections !== undefined) sitemapCollections = parsed.sitemapCollections;
-        } catch(e) {}
+    const parsedSettings = await getGeneralSettingsCached(db);
+    if (parsedSettings) {
+        if (parsedSettings.siteUrl) siteUrl = parsedSettings.siteUrl;
+        if (parsedSettings.sitemapCollections !== undefined) sitemapCollections = parsedSettings.sitemapCollections;
     }
 
-    const page = parseInt(params.page || '1', 10);
+    const allCollections = await getAllCollectionsCached(db);
+    const page = Math.max(1, parseInt(params.page || '1', 10));
     const CHUNK_SIZE = SITEMAP_PAGE_SIZE;
+    const offset = (page - 1) * CHUNK_SIZE;
     
     let allowedColIds: number[] | null = null;
     if (sitemapCollections !== null) {
         if (sitemapCollections.length === 0) {
              allowedColIds = [];
         } else {
-             const cols = await db.select({ id: collections.id }).from(collections).where(inArray(collections.slug, sitemapCollections));
-             allowedColIds = cols.map(c => c.id);
+             allowedColIds = allCollections
+                 .filter((c: any) => sitemapCollections!.includes(c.slug))
+                 .map((c: any) => c.id);
         }
     }
 
-    let condition: any = eq(entries.status, 'published');
-
+    // Step 1: Fetch entry IDs only using covering index (entries_collection_status_id_idx or entries_status_id_idx)
+    // so SQLite never loads table rows for rows skipped by OFFSET!
+    let entryIds: number[] = [];
     if (allowedColIds !== null) {
         if (allowedColIds.length === 0) {
-            condition = sql`1=0`; // Empty
+            entryIds = [];
+        } else if (allowedColIds.length === 1) {
+            const idRows = await db.select({ id: entries.id })
+                .from(entries)
+                .where(and(eq(entries.collectionId, allowedColIds[0]), eq(entries.status, 'published')))
+                .orderBy(desc(entries.id))
+                .limit(CHUNK_SIZE)
+                .offset(offset);
+            entryIds = idRows.map(r => r.id);
         } else {
-            condition = and(eq(entries.status, 'published'), inArray(entries.collectionId, allowedColIds));
+            const idRows = await db.select({ id: entries.id })
+                .from(entries)
+                .where(and(eq(entries.status, 'published'), inArray(entries.collectionId, allowedColIds)))
+                .orderBy(desc(entries.id))
+                .limit(CHUNK_SIZE)
+                .offset(offset);
+            entryIds = idRows.map(r => r.id);
         }
+    } else {
+        const idRows = await db.select({ id: entries.id })
+            .from(entries)
+            .where(eq(entries.status, 'published'))
+            .orderBy(desc(entries.id))
+            .limit(CHUNK_SIZE)
+            .offset(offset);
+        entryIds = idRows.map(r => r.id);
     }
 
-    const pageEntries = await db.select({ 
-        id: entries.id, 
-        slug: entries.slug, 
-        updatedAt: entries.updatedAt, 
-        publishedAt: entries.publishedAt 
-    })
-    .from(entries)
-    .where(condition)
-    .orderBy(desc(entries.id))
-    .limit(CHUNK_SIZE)
-    .offset((page - 1) * CHUNK_SIZE);
-
-    if (pageEntries.length === 0) {
+    if (entryIds.length === 0) {
         return new Response('<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>', { 
             headers: { 'Content-Type': 'application/xml; charset=utf-8' }
         });
     }
 
-    const entryIds = pageEntries.map(e => e.id);
+    // Step 2: Fetch slug + timestamps by PK in chunks of 50
+    const pageEntriesRaw: any[] = [];
     let canonicalMap: Record<number, string> = {};
     
-    // Chunk the canonical URL lookup to respect SQLite param binding limits (chunk by 50 to be safe)
     for (let i = 0; i < entryIds.length; i += 50) {
         const chunk = entryIds.slice(i, i + 50);
         if (chunk.length > 0) {
-            const part = await getCanonicalUrls(db, chunk);
+            const rows = await db.select({
+                id: entries.id,
+                slug: entries.slug,
+                updatedAt: entries.updatedAt,
+                publishedAt: entries.publishedAt
+            }).from(entries).where(inArray(entries.id, chunk));
+            pageEntriesRaw.push(...rows);
+
+            const part = await getCanonicalUrls(db, chunk, allCollections);
             canonicalMap = { ...canonicalMap, ...part };
         }
     }
+
+    const entryById = new Map(pageEntriesRaw.map(e => [e.id, e]));
+    const pageEntries = entryIds.map(id => entryById.get(id)).filter(Boolean);
 
     let xml = `<?xml version="1.0" encoding="UTF-8"?>\n`;
     xml += `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n`;

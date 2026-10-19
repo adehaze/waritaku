@@ -34,8 +34,15 @@ export function resolveEntryDisplayFields(
     const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
     const generatedExcerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
 
+    let fallbackImg: string | null = null;
+    const rawImage = (mappings.imageField && data[mappings.imageField]) || data.featuredImageUrl || data.featuredImage || null;
+    if (!rawImage && rawContent) {
+        const imgMatch = rawContent.match(/<img[^>]+src=["']([^"']+)["']/i);
+        if (imgMatch) fallbackImg = imgMatch[1];
+    }
+
     const displayTitle = (mappings.titleField && data[mappings.titleField]) || data.title || entry?.slug || '';
-    const displayImage = (mappings.imageField && data[mappings.imageField]) || data.featuredImageUrl || data.featuredImage || null;
+    const displayImage = rawImage || fallbackImg;
     const displayExcerpt = (mappings.excerptField && data[mappings.excerptField]) 
         ? data[mappings.excerptField] 
         : (data.excerpt || fallbackExcerpt || generatedExcerpt);
@@ -48,26 +55,122 @@ export function resolveEntryDisplayFields(
         displayContent,
         excerpt: displayExcerpt,
         title: displayTitle,
-        featuredImageUrl: displayImage || data.featuredImageUrl || null,
+        featuredImageUrl: displayImage || null,
         content: displayContent
     };
 }
 
-// Shared edge-cached read of the collections table (10 min TTL).
+let _indexesEnsured = false;
+export async function ensureOptimalIndexes(db: any): Promise<void> {
+    if (_indexesEnsured || !db) return;
+    _indexesEnsured = true;
+    try {
+        await db.run(sql`CREATE INDEX IF NOT EXISTS entry_terms_term_entry_idx ON entry_terms (term_id, entry_id)`);
+        await db.run(sql`CREATE INDEX IF NOT EXISTS entries_author_collection_status_id_idx ON entries (author_id, collection_id, status, id)`);
+    } catch {
+        // Ignore if D1 is read-limited; will succeed automatically after midnight UTC reset
+        _indexesEnsured = false;
+    }
+}
+
+let _memCollections: { list: any[]; ts: number } | null = null;
+// Shared edge-cached + isolate-cached read of the collections table (10 min TTL).
 export async function getAllCollectionsCached(db: any): Promise<any[]> {
+    if (_memCollections && Date.now() - _memCollections.ts < 300_000) {
+        return _memCollections.list;
+    }
     const KEY = 'https://waritaku.internal/cache/all_collections';
     let list: any[] = [];
     const hit = (typeof caches !== 'undefined') ? await caches.default.match(new Request(KEY)) : null;
-    if (hit) { try { list = await hit.json(); } catch {} }
-    if (list.length === 0) {
-        list = await db.select().from(collections);
-        if (typeof caches !== 'undefined' && list.length > 0) {
-            caches.default.put(new Request(KEY), new Response(JSON.stringify(list), {
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' }
-            })).catch(() => {});
+    if (hit) {
+        try { list = await hit.json(); } catch {}
+    }
+    if (list.length === 0 && db) {
+        try {
+            await ensureOptimalIndexes(db);
+            list = await db.select().from(collections);
+            if (typeof caches !== 'undefined' && list.length > 0) {
+                caches.default.put(new Request(KEY), new Response(JSON.stringify(list), {
+                    headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' }
+                })).catch(() => {});
+            }
+        } catch (err) {
+            if (_memCollections?.list?.length) return _memCollections.list;
+            throw err;
         }
     }
+    if (list.length > 0) {
+        _memCollections = { list, ts: Date.now() };
+    }
     return list;
+}
+
+let _memTaxonomies: { list: any[]; ts: number } | null = null;
+// Shared edge-cached + isolate-cached read of the taxonomies table (30 min TTL).
+export async function getAllTaxonomiesCached(db: any): Promise<any[]> {
+    if (_memTaxonomies && Date.now() - _memTaxonomies.ts < 600_000) {
+        return _memTaxonomies.list;
+    }
+    const TAX_CACHE_KEY = 'https://waritaku.internal/cache/all_taxonomies_full';
+    const TAX_CACHE_TTL = 1800;
+    let list: any[] = [];
+    const hit = (typeof caches !== 'undefined') ? await caches.default.match(new Request(TAX_CACHE_KEY)) : null;
+    if (hit) {
+        try { list = await hit.json(); } catch {}
+    }
+    if (list.length === 0 && db) {
+        try {
+            list = await db.select().from(taxonomies);
+            if (typeof caches !== 'undefined' && list.length > 0) {
+                caches.default.put(new Request(TAX_CACHE_KEY), new Response(JSON.stringify(list), {
+                    headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${TAX_CACHE_TTL}` }
+                })).catch(() => {});
+            }
+        } catch (err) {
+            if (_memTaxonomies?.list?.length) return _memTaxonomies.list;
+            throw err;
+        }
+    }
+    if (list.length > 0) {
+        _memTaxonomies = { list, ts: Date.now() };
+    }
+    return list;
+}
+
+let _memGeneralSettings: { data: any; ts: number } | null = null;
+export async function getGeneralSettingsCached(db: any): Promise<any> {
+    if (_memGeneralSettings && Date.now() - _memGeneralSettings.ts < 300_000) {
+        return _memGeneralSettings.data;
+    }
+    const SETTINGS_KEY = 'https://waritaku.internal/cache/general_settings';
+    const hit = (typeof caches !== 'undefined') ? await caches.default.match(new Request(SETTINGS_KEY)) : null;
+    if (hit) {
+        try {
+            const parsed = await hit.json();
+            if (parsed) {
+                _memGeneralSettings = { data: parsed, ts: Date.now() };
+                return parsed;
+            }
+        } catch {}
+    }
+    if (db) {
+        try {
+            const rows = await db.select().from(settings).where(eq(settings.key, 'general_settings')).limit(1);
+            if (rows.length > 0) {
+                const parsed = safeJsonParse(rows[0].value, {});
+                _memGeneralSettings = { data: parsed, ts: Date.now() };
+                if (typeof caches !== 'undefined') {
+                    caches.default.put(new Request(SETTINGS_KEY), new Response(JSON.stringify(parsed), {
+                        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=600' }
+                    })).catch(() => {});
+                }
+                return parsed;
+            }
+        } catch {
+            if (_memGeneralSettings?.data) return _memGeneralSettings.data;
+        }
+    }
+    return _memGeneralSettings?.data || {};
 }
 
 // Batched version of getCanonicalUrl — no JOINs anywhere.
@@ -84,24 +187,7 @@ export async function getCanonicalUrls(
     if (!entryIds.length) return {};
 
     // ── Step A: Fetch taxonomies once — tiny table, cache in CF edge ──────────
-    const TAX_CACHE_KEY = 'https://waritaku.internal/cache/taxonomies';
-    const TAX_CACHE_TTL = 1800; // 30 minutes — taxonomies almost never change
-    let allTaxonomies: any[] = [];
-    const cfTaxCache = (typeof caches !== 'undefined')
-        ? await caches.default.match(new Request(TAX_CACHE_KEY)) : null;
-    if (cfTaxCache) {
-        try { allTaxonomies = await cfTaxCache.json(); } catch {}
-    }
-    if (allTaxonomies.length === 0) {
-        allTaxonomies = await db.select({
-            id: taxonomies.id, slug: taxonomies.slug, entryUrlFormat: taxonomies.entryUrlFormat
-        }).from(taxonomies);
-        if (typeof caches !== 'undefined' && allTaxonomies.length > 0) {
-            caches.default.put(new Request(TAX_CACHE_KEY), new Response(JSON.stringify(allTaxonomies), {
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${TAX_CACHE_TTL}` }
-            })).catch(() => {});
-        }
-    }
+    const allTaxonomies = await getAllTaxonomiesCached(db);
     const taxById = new Map(allTaxonomies.map((t: any) => [t.id, t]));
 
     // ── Step B: Build collections map. If the caller did not pass collections,
@@ -220,105 +306,88 @@ export async function getCanonicalUrls(
 
 
 export const getCanonicalUrl = async (db: any, entryId: number, entrySlug: string) => {
-    // Split into two queries to avoid full table scan
-    const termsResults = await db.select({
-        termId: terms.id,
-        termSlug: terms.slug,
-        taxonomySlug: taxonomies.slug,
-        entryUrlFormat: taxonomies.entryUrlFormat,
-    })
-    .from(entryTerms)
-    .innerJoin(terms, eq(entryTerms.termId, terms.id))
-    .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-    .where(eq(entryTerms.entryId, entryId));
-    
-    if (termsResults.length > 0) {
-        const entriesResults = await db.select({
-            data: entries.data,
-            supports: collections.supports
-        })
-        .from(entries)
-        .innerJoin(collections, eq(entries.collectionId, collections.id))
-        .where(eq(entries.id, entryId))
-        .limit(1);
-
-        const entryData = entriesResults[0]?.data || '{}';
-        const supports = entriesResults[0]?.supports || '{}';
-
-        const prefixRes = termsResults.map((r: any) => ({
-            termId: r.termId,
-            termSlug: r.termSlug,
-            taxonomySlug: r.taxonomySlug,
-            entryUrlFormat: r.entryUrlFormat,
-            supports: supports,
-            entryData: entryData
-        })).filter((r: any) => r.entryUrlFormat !== 'none');
-
-        if (prefixRes.length === 0) return entrySlug;
-
-        const formatPrefix = (match: any) => match.entryUrlFormat === 'long' ? `${match.taxonomySlug}/${match.termSlug}` : match.termSlug;
-
-        const parsedData = safeJsonParse(prefixRes[0].entryData, {} as any);
-        const termOverride = parsedData.primaryTermId;
-        if (termOverride) {
-            const overrideMatch = prefixRes.find((r: any) => r.termId === termOverride || r.termId.toString() === termOverride.toString());
-            if (overrideMatch) return `${formatPrefix(overrideMatch)}/${entrySlug}`;
-        }
-        
-        const override = parsedData.primaryTaxonomyOverride;
-        if (override) {
-            const overrideMatch = prefixRes.find((r: any) => r.taxonomySlug === override);
-            if (overrideMatch) return `${formatPrefix(overrideMatch)}/${entrySlug}`;
-        }
-
-        let supportsData: any = {};
-        try { supportsData = JSON.parse(prefixRes[0].supports || '{}'); } catch(e) {}
-        const priorityArray: string[] = supportsData.taxonomies || [];
-
-        prefixRes.sort((a: any, b: any) => {
-            const idxA = priorityArray.indexOf(a.taxonomySlug);
-            const idxB = priorityArray.indexOf(b.taxonomySlug);
-            const rankA = idxA === -1 ? 999 : idxA;
-            const rankB = idxB === -1 ? 999 : idxB;
-            return rankA - rankB;
-        });
-
-        return `${formatPrefix(prefixRes[0])}/${entrySlug}`;
-    }
-    return entrySlug;
+    const map = await getCanonicalUrls(db, [entryId]);
+    const prefix = map[entryId];
+    return prefix ? `${prefix}/${entrySlug}` : entrySlug;
 };
+
+async function fetchEntryCategoryMap(db: any, entryIds: number[], filterTaxonomyId?: number): Promise<Record<number, any[]>> {
+    const categoryMap: Record<number, any[]> = {};
+    if (!entryIds.length) return categoryMap;
+
+    const etRows = await db.select({ entryId: entryTerms.entryId, termId: entryTerms.termId })
+        .from(entryTerms)
+        .where(inArray(entryTerms.entryId, entryIds));
+    const termIds = Array.from(new Set(etRows.map((r: any) => r.termId))) as number[];
+    if (!termIds.length) return categoryMap;
+
+    const termRows: any[] = [];
+    for (let t = 0; t < termIds.length; t += 90) {
+        const chunk = termIds.slice(t, t + 90);
+        const rows = await db.select({
+            id: terms.id,
+            name: terms.name,
+            slug: terms.slug,
+            taxonomyId: terms.taxonomyId
+        }).from(terms).where(inArray(terms.id, chunk));
+        termRows.push(...rows);
+    }
+
+    const termById = new Map<number, any>();
+    for (const tr of termRows) {
+        if (filterTaxonomyId !== undefined && tr.taxonomyId !== filterTaxonomyId) continue;
+        termById.set(tr.id, tr);
+    }
+
+    for (const et of etRows) {
+        const tr = termById.get(et.termId);
+        if (!tr) continue;
+        if (!categoryMap[et.entryId]) categoryMap[et.entryId] = [];
+        categoryMap[et.entryId].push({
+            entryId: et.entryId,
+            id: tr.id,
+            name: tr.name,
+            slug: tr.slug
+        });
+    }
+    return categoryMap;
+}
+
+async function fetchEntriesWithAuthorsByIds(db: any, pageIds: number[]): Promise<{ entry: any; author: any }[]> {
+    if (!pageIds.length) return [];
+    const pageEntryRows: any[] = [];
+    for (let i = 0; i < pageIds.length; i += 50) {
+        const chunk = pageIds.slice(i, i + 50);
+        const rows = await db.select().from(entries).where(inArray(entries.id, chunk));
+        pageEntryRows.push(...rows);
+    }
+    const authorIds = Array.from(new Set(pageEntryRows.map((e: any) => e.authorId).filter(Boolean))) as number[];
+    const authorRows = authorIds.length > 0
+        ? await db.select({
+            id: users.id, name: users.name, slug: users.slug, role: users.role,
+            firstName: users.firstName, lastName: users.lastName, bio: users.bio,
+            avatarUrl: users.avatarUrl, socialLinks: users.socialLinks,
+        }).from(users).where(inArray(users.id, authorIds))
+        : [];
+    const authorById = new Map(authorRows.map((u: any) => [u.id, u]));
+    const entryById = new Map(pageEntryRows.map((e: any) => [e.id, e]));
+    return pageIds
+        .map((id: number) => entryById.get(id))
+        .filter(Boolean)
+        .map((e: any) => ({ entry: e, author: authorById.get(e.authorId) || null }));
+}
 
 export async function resolveRouteData(db: any, slug: string, currentPage: number = 1, pageSize: number = 12, sortTermBy: string = 'popular', options: { dateArchiveMode?: string } = {}) {
     if (!db || !slug) return null;
 
-    // Helper to get a collection by slug — uses the already-cached allCollections (zero D1)
-    // Note: allCollections is loaded below; this helper is only called AFTER that block.
-    const getCollection = (cSlug: string) => {
-        return allCollections.find((c: any) => c.slug === cSlug) || null;
-    };
+    const allCollections = await getAllCollectionsCached(db);
+    const allTaxonomies = await getAllTaxonomiesCached(db);
+    const taxById = new Map(allTaxonomies.map((t: any) => [t.id, t]));
 
-    // Cache all collections at the CF edge — they rarely change (new collection type = very rare).
-    // This eliminates ~9k D1 reads/day from resolveRouteData being called on every SSR render.
-    const COLLECTIONS_CACHE_KEY = 'https://waritaku.internal/cache/all_collections';
-    const COLLECTIONS_CACHE_TTL = 600; // 10 minutes
-    let allCollections: any[] = [];
-    const cfColCache = (typeof caches !== 'undefined') ? await caches.default.match(new Request(COLLECTIONS_CACHE_KEY)) : null;
-    if (cfColCache) {
-        try { allCollections = await cfColCache.json(); } catch {}
-    }
-    if (allCollections.length === 0) {
-        allCollections = await db.select().from(collections);
-        if (typeof caches !== 'undefined' && allCollections.length > 0) {
-            caches.default.put(new Request(COLLECTIONS_CACHE_KEY), new Response(JSON.stringify(allCollections), {
-                headers: { 'Content-Type': 'application/json', 'Cache-Control': `public, max-age=${COLLECTIONS_CACHE_TTL}` }
-            })).catch(() => {});
-        }
-    }
     const contentCollections = allCollections.filter((c: any) => c.slug !== 'pages');
     const contentCollectionIds = contentCollections.map((c: any) => c.id);
     const totalContentItems = contentCollections.reduce((sum: any, c: any) => sum + (c.entryCount || 0), 0);
     const collectionById = new Map(allCollections.map((c: any) => [c.id, c]));
-
 
     // 0. Check Date Archive (e.g., 2025/03 or 2025/03/15) — WIB (UTC+7) aware
     let dateArchiveMode = options.dateArchiveMode || 'date';
@@ -368,7 +437,6 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
             utcEnd = new Date(new Date(isoEnd).getTime() - 1).toISOString();
         }
 
-
         // Count query — date archive has no stored counter so a targeted count is needed.
         // Use the publishedAt index (entries_collection_status_published_idx) which covers this filter.
         const countResult = await db.select({ count: sql<number>`count(*)` })
@@ -385,25 +453,22 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
         const totalItems = countResult[0]?.count || 0;
         const totalPages = Math.ceil(totalItems / pageSize);
 
-
-        // Fetch entries for date archive
-        const entriesResult = await db.select({
-            entry: entries,
-            author: users
-        })
-        .from(entries)
-        .leftJoin(users, eq(entries.authorId, users.id))
-        .where(
-            and(
-                inArray(entries.collectionId, contentCollectionIds),
-                eq(entries.status, 'published'),
-                gte(entries.publishedAt, utcStart),
-                lte(entries.publishedAt, utcEnd)
+        // Two-step fetch for date archive
+        const dateIdRows = await db.select({ id: entries.id })
+            .from(entries)
+            .where(
+                and(
+                    inArray(entries.collectionId, contentCollectionIds),
+                    eq(entries.status, 'published'),
+                    gte(entries.publishedAt, utcStart),
+                    lte(entries.publishedAt, utcEnd)
+                )
             )
-        )
-        .orderBy(desc(entries.id))
-        .limit(pageSize)
-        .offset((currentPage - 1) * pageSize);
+            .orderBy(desc(entries.id))
+            .limit(pageSize)
+            .offset((currentPage - 1) * pageSize);
+
+        const entriesResult = await fetchEntriesWithAuthorsByIds(db, dateIdRows.map((r: any) => r.id));
 
         const categoryArticles = entriesResult.map((r: any) => {
             const data = safeJsonParse(r.entry.data, {} as any);
@@ -416,7 +481,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 publishedAt: r.entry.publishedAt,
                 ...data,
                 authorName: r.author?.name || 'Writer',
-                categoryName: 'Article', // Can be enriched with terms
+                categoryName: 'Article',
                 ...displayFields
             };
         });
@@ -438,20 +503,12 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
     const segments = slug.split('/');
     const lastSegment = segments[segments.length - 1];
 
-    // 0.5 Check Collection Archive (e.g. /articles)
-    const collectionArchiveMatch = await db.select().from(collections).where(eq(collections.slug, slug)).limit(1);
-    if (collectionArchiveMatch.length > 0) {
-        const collection = collectionArchiveMatch[0];
-        
-        // Use stored entryCount — avoids a COUNT(*) full index scan.
-        // syncCounts() keeps this value accurate after every publish/delete.
+    // 0.5 Check Collection Archive (e.g. /articles) — use cached allCollections (zero D1 reads)
+    const collection = allCollections.find((c: any) => c.slug === slug);
+    if (collection) {
         const totalItems = Number(collection.entryCount || 0);
         const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
-
-        // Fetch paginated entries in two steps.
-        // Step 1: IDs only. SQLite walks the (collection_id, status, id) index and does
-        // not load article blobs for the rows skipped by OFFSET.
         const pageIdRows = await db.select({ id: entries.id })
             .from(entries)
             .where(and(eq(entries.collectionId, collection.id), eq(entries.status, 'published')))
@@ -460,47 +517,14 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
             .offset((currentPage - 1) * pageSize);
         const pageIds = pageIdRows.map((r: any) => r.id);
 
-        // Step 2: full rows by PK, then authors by PK (no password_hash or email).
-        const pageEntryRows = pageIds.length > 0
-            ? await db.select().from(entries).where(inArray(entries.id, pageIds))
-            : [];
-        const authorIds = Array.from(new Set(pageEntryRows.map((e: any) => e.authorId).filter(Boolean))) as number[];
-        const authorRows = authorIds.length > 0
-            ? await db.select({
-                id: users.id, name: users.name, slug: users.slug, role: users.role,
-                firstName: users.firstName, lastName: users.lastName, bio: users.bio,
-                avatarUrl: users.avatarUrl, socialLinks: users.socialLinks,
-            }).from(users).where(inArray(users.id, authorIds))
-            : [];
-        const authorById = new Map(authorRows.map((u: any) => [u.id, u]));
-        const entryById = new Map(pageEntryRows.map((e: any) => [e.id, e]));
-        const articlesResult = pageIds
-            .map((id: number) => entryById.get(id))
-            .filter(Boolean)
-            .map((e: any) => ({ entry: e, author: authorById.get(e.authorId) || null }));
+        const articlesResult = await fetchEntriesWithAuthorsByIds(db, pageIds);
 
         const categoryArticles = [];
         const entryIds = articlesResult.map((r: any) => r.entry.id);
         const canonicalMap = await getCanonicalUrls(db, entryIds, allCollections);
         
-        // Batch fetch primary categories for display
-        let categoryMap: Record<number, any[]> = {};
-        if (entryIds.length > 0) {
-            const catTax = await db.select({ id: taxonomies.id }).from(taxonomies).where().limit(1);
-            if (catTax.length > 0) {
-                const catTermRows = await db.select({ entryId: entryTerms.entryId, id: terms.id, name: terms.name, slug: terms.slug })
-                    .from(entryTerms)
-                    .innerJoin(terms, eq(entryTerms.termId, terms.id))
-                    .where(and(
-                        eq(terms.taxonomyId, catTax[0].id),
-                        sql`${entryTerms.entryId} IN (${sql.join(entryIds.map((id: any) => sql`${id}`), sql`, `)})`
-                    ));
-                for (const row of catTermRows) {
-                    if (!categoryMap[row.entryId]) categoryMap[row.entryId] = [];
-                    categoryMap[row.entryId].push(row);
-                }
-            }
-        }
+        const firstTaxId = allTaxonomies.length > 0 ? allTaxonomies[0].id : undefined;
+        const categoryMap = await fetchEntryCategoryMap(db, entryIds, firstTaxId);
 
         for (const r of articlesResult) {
             const data = safeJsonParse(r.entry.data, {} as any);
@@ -537,72 +561,40 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
         };
     }
 
-    // 0.6 Check Taxonomy Archive (e.g. /tags)
-    const taxonomyArchiveMatch = await db.select().from(taxonomies).where(and(eq(taxonomies.slug, slug), eq(taxonomies.isRouted, true))).limit(1);
-    if (taxonomyArchiveMatch.length > 0) {
-        const taxonomy = taxonomyArchiveMatch[0];
-        
+    // 0.6 Check Taxonomy Archive (e.g. /tags) — use cached allTaxonomies (zero D1 reads)
+    const taxonomy = allTaxonomies.find((t: any) => t.slug === slug && Boolean(t.isRouted));
+    if (taxonomy) {
         if (taxonomy.umbrellaViewMode === 'all_entries') {
-            // Count total entries in this taxonomy
-            const countQuery = await db.select({ count: sql<number>`count(distinct ${entries.id})` })
-                .from(entryTerms)
-                .innerJoin(terms, eq(entryTerms.termId, terms.id))
-                .innerJoin(entries, eq(entryTerms.entryId, entries.id))
-                .where(and(
-                    eq(terms.taxonomyId, taxonomy.id),
-                    eq(entries.status, 'published')
-                ));
-            const totalItems = Number(countQuery[0]?.count || 0);
+            const taxTermRows = await db.select({ id: terms.id, entryCount: terms.entryCount })
+                .from(terms)
+                .where(eq(terms.taxonomyId, taxonomy.id));
+            const taxTermIds = taxTermRows.map((t: any) => t.id);
+            const totalItems = Math.min(totalContentItems, taxTermRows.reduce((s: number, t: any) => s + Number(t.entryCount || 0), 0));
             const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
-            const idResult = await db.select({ id: entries.id })
-                .from(entryTerms)
-                .innerJoin(terms, eq(entryTerms.termId, terms.id))
-                .innerJoin(entries, eq(entryTerms.entryId, entries.id))
-                .where(and(
-                    eq(terms.taxonomyId, taxonomy.id),
-                    eq(entries.status, 'published')
-                ))
-                .groupBy(entries.id)
-                .orderBy(desc(entries.id))
-                .limit(pageSize)
-                .offset((currentPage - 1) * pageSize);
-
-            const entryIds = idResult.map((r: any) => r.id);
-            let articlesResult: any[] = [];
-            if (entryIds.length > 0) {
-                articlesResult = await db.select({
-                    entry: entries,
-                    author: users
-                })
-                .from(entries)
-                .leftJoin(users, eq(entries.authorId, users.id))
-                .where(sql`${entries.id} IN (${sql.join(entryIds.map((id: any) => sql`${id}`), sql`, `)})`)
-                .orderBy(desc(entries.id));
-            }
-
-            const categoryArticles = [];
-            const canonicalMap = await getCanonicalUrls(db, entryIds, allCollections);
-            
-            const categoryMap: any = {};
-            if (entryIds.length > 0) {
-                const catTermRows = await db.select({
-                    entryId: entryTerms.entryId,
-                    id: terms.id,
-                    name: terms.name,
-                    slug: terms.slug
-                })
-                .from(entryTerms)
-                .innerJoin(terms, eq(entryTerms.termId, terms.id))
-                .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-                .where(and(
-                    sql`${entryTerms.entryId} IN (${sql.join(entryIds.map((id: any) => sql`${id}`), sql`, `)})`
-                ));
-                for (const row of catTermRows) {
-                    if (!categoryMap[row.entryId]) categoryMap[row.entryId] = [];
-                    categoryMap[row.entryId].push(row);
+            let entryIds: number[] = [];
+            if (taxTermIds.length > 0) {
+                const needCount = (currentPage * pageSize) + 12;
+                const etRows = await db.select({ entryId: entryTerms.entryId })
+                    .from(entryTerms)
+                    .where(inArray(entryTerms.termId, taxTermIds.slice(0, 90)))
+                    .orderBy(desc(entryTerms.entryId))
+                    .limit(needCount * 2);
+                const uniqueCandidateIds = Array.from(new Set(etRows.map((r: any) => r.entryId))).sort((a: any, b: any) => b - a) as number[];
+                const sliceIds = uniqueCandidateIds.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+                if (sliceIds.length > 0) {
+                    const pubRows = await db.select({ id: entries.id })
+                        .from(entries)
+                        .where(and(inArray(entries.id, sliceIds), eq(entries.status, 'published')))
+                        .orderBy(desc(entries.id));
+                    entryIds = pubRows.map((r: any) => r.id);
                 }
             }
+
+            const articlesResult = await fetchEntriesWithAuthorsByIds(db, entryIds);
+            const categoryArticles = [];
+            const canonicalMap = await getCanonicalUrls(db, entryIds, allCollections);
+            const categoryMap = await fetchEntryCategoryMap(db, entryIds);
 
             for (const r of articlesResult) {
                 const data = safeJsonParse(r.entry.data, {} as any);
@@ -646,8 +638,6 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 articleBottomHtml: '' 
             };
         } else {
-            // Count total terms using taxonomy_id index (tiny result set).
-            // Fetch IDs only — no full row scan, uses terms_taxonomy_idx.
             const allTermIds = await db.select({ id: terms.id })
                 .from(terms)
                 .where(eq(terms.taxonomyId, taxonomy.id));
@@ -684,7 +674,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                     taxonomySlug: taxonomy.slug, 
                     metaTitle: `Archive: ${taxonomy.label || slug}`,
                     omitTaxonomySlug: taxonomy.omitTaxonomySlug,
-                    taxonomy: taxonomy // Pass entire taxonomy to respect allowIndexing in SEO block
+                    taxonomy: taxonomy
                 }, 
                 termsList, 
                 totalPages, 
@@ -693,174 +683,181 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
         }
     }
 
-    // 1. Try Entry by Slug (Article, Page, etc.)
-    const entryResult = await db.select({
-        entry: entries,
-        collection: collections,
-        author: users
-    })
-    .from(entries)
-    .innerJoin(collections, eq(entries.collectionId, collections.id))
-    .leftJoin(users, eq(entries.authorId, users.id))
-    .where(
-        and(
-            eq(entries.slug, lastSegment),
-            eq(entries.status, 'published')
-        )
-    )
-    .limit(1);
+    // 1. Try Entry by Slug (Article, Page, etc.) — pure unique index lookup on entries.slug
+    const rawEntryRows = await db.select()
+        .from(entries)
+        .where(and(eq(entries.slug, lastSegment), eq(entries.status, 'published')))
+        .limit(1);
 
-    if (entryResult.length > 0) {
-        const { entry, collection, author } = entryResult[0];
-
-        // Strict URL Enforcement: If the entry has a prefix configured, ensure the user visited that exact prefix
-        const canonicalUrl = await getCanonicalUrl(db, entry.id, entry.slug);
-        if (slug !== canonicalUrl) {
-            return { redirect: `/${canonicalUrl}` };
-        }
-
-        const parsedData = safeJsonParse(entry.data, {} as any);
-        const genSlug = author?.name ? author.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : 'writer';
-        
-        let collectionSupports = {};
-        try {
-            collectionSupports = JSON.parse(collection.supports || '{}');
-        } catch(e) {}
-
-        const data: any = {
-            id: entry.id,
-            slug: entry.slug,
-            canonicalUrl: `/${canonicalUrl}`,
-            status: entry.status,
-            publishedAt: entry.publishedAt,
-            ...parsedData,
-            authorId: author?.id || 0,
-            authorName: author?.name || 'Writer',
-            authorSlug: author?.slug || genSlug,
-            authorBio: author?.bio || '',
-            authorAvatar: author?.avatarUrl || '',
-            tags: [],
-            supports: collectionSupports
-        };
-
-        // Generic taxonomy mapping
-        const collTaxonomies: string[] = (collectionSupports as any).taxonomies || [];
-        if (contentCollectionIds.includes(collection.id) || collTaxonomies.length > 0) {
-            const entryTermsResult = await db.select({
-                term: terms,
-                taxonomy: taxonomies
-            })
-            .from(entryTerms)
-            .innerJoin(terms, eq(entryTerms.termId, terms.id))
-            .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-            .where(eq(entryTerms.entryId, entry.id));
-
-            // Populate generic taxonomyTerms object
-            data.taxonomyTerms = {};
-            entryTermsResult.forEach((t: any) => {
-                const taxSlug = t.taxonomy.slug;
-                if (!data.taxonomyTerms[taxSlug]) data.taxonomyTerms[taxSlug] = [];
-                
-                // Determine URL based on omitTaxonomySlug
-                const omitTaxSlug = t.taxonomy.omitTaxonomySlug === true || t.taxonomy.omitTaxonomySlug === 1;
-                const url = omitTaxSlug ? `/${t.term.slug}` : `/${taxSlug}/${t.term.slug}`;
-
-                data.taxonomyTerms[taxSlug].push({
-                    ...t.term,
-                    url
-                });
-            });
-
-            // Backwards compatibility for templates expecting data.categories and data.tags
-            const cats = entryTermsResult.filter((t: any) => t.taxonomy.slug === 'categories');
-            const primaryTermId = parsedData.primaryTermId;
-            if (primaryTermId) {
-                cats.sort((a: any, b: any) => {
-                    if (a.term.id === primaryTermId) return -1;
-                    if (b.term.id === primaryTermId) return 1;
-                    return 0;
-                });
-            }
-            data.categories = cats.map((c: any) => ({ name: c.term.name, slug: c.term.slug }));
-            data.categoryName = cats.length > 0 ? cats[0].term.name : 'Article';
-            data.categorySlug = cats.length > 0 ? cats[0].term.slug : 'all';
-
-            data.tags = entryTermsResult.filter((t: any) => t.taxonomy.slug === 'tags').map((t: any) => t.term);
-
-            // Process Related Items if configured in layout blocks
-            data.relatedItems = [];
-            // Note: The actual database query for Related Items has been removed.
-            // It is now handled via Client-Side Edge-Cache Shuffle in ModularTemplateRenderer.astro.
-
-            // Extract Article Custom HTML
-            let articleBottomHtml = '';
-            let articleUpperHtml = '';
-            const genSettings = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-            if (genSettings.length > 0) {
-                try {
-                    const parsed = JSON.parse(genSettings[0].value);
-                    articleBottomHtml = parsed.articleBottomHtml || '';
-                    articleUpperHtml = parsed.articleUpperHtml || '';
-                } catch(e) {}
+    if (rawEntryRows.length > 0) {
+        const entry = rawEntryRows[0];
+        const collection = collectionById.get(entry.collectionId);
+        if (collection) {
+            let author: any = null;
+            if (entry.authorId) {
+                const authorRows = await db.select({
+                    id: users.id, name: users.name, slug: users.slug, role: users.role,
+                    firstName: users.firstName, lastName: users.lastName, bio: users.bio,
+                    avatarUrl: users.avatarUrl, socialLinks: users.socialLinks,
+                }).from(users).where(eq(users.id, entry.authorId)).limit(1);
+                author = authorRows[0] || null;
             }
 
-            return { pageType: 'article' as const, data, categoryArticles: [], totalPages: 1, articleUpperHtml, articleBottomHtml };
-        } 
-        
-        // If it's a page collection
-        if (collection.slug === 'pages') {
-            return { pageType: 'page' as const, data, categoryArticles: [], totalPages: 1, articleBottomHtml: '' };
-        }
+            const parsedData = safeJsonParse(entry.data, {} as any);
+            let collectionSupports: any = {};
+            try {
+                collectionSupports = JSON.parse(collection.supports || '{}');
+            } catch(e) {}
 
-        // Generic collection fallback (for custom content types in the future)
-        return { pageType: collection.slug as any, data, categoryArticles: [], totalPages: 1, articleBottomHtml: '' };
+            // Fetch entry's terms once by PK and join with cached taxonomies in JS
+            const etRows = await db.select({ termId: entryTerms.termId })
+                .from(entryTerms)
+                .where(eq(entryTerms.entryId, entry.id));
+            const termIds = etRows.map((r: any) => r.termId);
+            const termRows = termIds.length > 0
+                ? await db.select().from(terms).where(inArray(terms.id, termIds.slice(0, 90)))
+                : [];
+
+            const entryTermsResult = termRows
+                .map((term: any) => ({ term, taxonomy: taxById.get(term.taxonomyId) }))
+                .filter((r: any) => Boolean(r.taxonomy));
+
+            // Compute canonicalUrl in memory from entryTermsResult + collectionSupports (zero extra D1 queries)
+            let canonicalUrl = entry.slug;
+            const prefixCandidates = entryTermsResult.filter((r: any) => r.taxonomy.entryUrlFormat !== 'none');
+            if (prefixCandidates.length > 0) {
+                const formatPrefix = (match: any) =>
+                    match.taxonomy.entryUrlFormat === 'long'
+                        ? `${match.taxonomy.slug}/${match.term.slug}`
+                        : match.term.slug;
+
+                let matchedPrefix: string | null = null;
+                const termOverride = parsedData.primaryTermId;
+                if (termOverride) {
+                    const ov = prefixCandidates.find((r: any) => r.term.id === termOverride || r.term.id.toString() === termOverride.toString());
+                    if (ov) matchedPrefix = formatPrefix(ov);
+                }
+                if (!matchedPrefix && parsedData.primaryTaxonomyOverride) {
+                    const ov = prefixCandidates.find((r: any) => r.taxonomy.slug === parsedData.primaryTaxonomyOverride);
+                    if (ov) matchedPrefix = formatPrefix(ov);
+                }
+                if (!matchedPrefix) {
+                    const priorityArray: string[] = collectionSupports.taxonomies || [];
+                    const sorted = [...prefixCandidates].sort((a: any, b: any) => {
+                        const idxA = priorityArray.indexOf(a.taxonomy.slug);
+                        const idxB = priorityArray.indexOf(b.taxonomy.slug);
+                        return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
+                    });
+                    matchedPrefix = formatPrefix(sorted[0]);
+                }
+                if (matchedPrefix) {
+                    canonicalUrl = `${matchedPrefix}/${entry.slug}`;
+                }
+            }
+
+            if (slug !== canonicalUrl) {
+                return { redirect: `/${canonicalUrl}` };
+            }
+
+            const genSlug = author?.name ? author.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : 'writer';
+            const displayFields = resolveEntryDisplayFields(entry, parsedData, collection);
+
+            const data: any = {
+                id: entry.id,
+                slug: entry.slug,
+                canonicalUrl: `/${canonicalUrl}`,
+                status: entry.status,
+                publishedAt: entry.publishedAt,
+                ...parsedData,
+                ...displayFields,
+                authorId: author?.id || 0,
+                authorName: author?.name || 'Writer',
+                authorSlug: author?.slug || genSlug,
+                authorBio: author?.bio || '',
+                authorAvatar: author?.avatarUrl || '',
+                tags: [],
+                supports: collectionSupports
+            };
+
+            const collTaxonomies: string[] = collectionSupports.taxonomies || [];
+            if (contentCollectionIds.includes(collection.id) || collTaxonomies.length > 0) {
+                data.taxonomyTerms = {};
+                entryTermsResult.forEach((t: any) => {
+                    const taxSlug = t.taxonomy.slug;
+                    if (!data.taxonomyTerms[taxSlug]) data.taxonomyTerms[taxSlug] = [];
+                    const omitTaxSlug = t.taxonomy.omitTaxonomySlug === true || t.taxonomy.omitTaxonomySlug === 1;
+                    const url = omitTaxSlug ? `/${t.term.slug}` : `/${taxSlug}/${t.term.slug}`;
+                    data.taxonomyTerms[taxSlug].push({
+                        ...t.term,
+                        url
+                    });
+                });
+
+                const cats = entryTermsResult.filter((t: any) => t.taxonomy.slug === 'categories');
+                const primaryTermId = parsedData.primaryTermId;
+                if (primaryTermId) {
+                    cats.sort((a: any, b: any) => {
+                        if (a.term.id === primaryTermId) return -1;
+                        if (b.term.id === primaryTermId) return 1;
+                        return 0;
+                    });
+                }
+                data.categories = cats.map((c: any) => ({ name: c.term.name, slug: c.term.slug }));
+                data.categoryName = cats.length > 0 ? cats[0].term.name : 'Article';
+                data.categorySlug = cats.length > 0 ? cats[0].term.slug : 'all';
+
+                data.tags = entryTermsResult.filter((t: any) => t.taxonomy.slug === 'tags').map((t: any) => t.term);
+                data.relatedItems = [];
+
+                const genSettings = await getGeneralSettingsCached(db);
+                const articleBottomHtml = genSettings?.articleBottomHtml || '';
+                const articleUpperHtml = genSettings?.articleUpperHtml || '';
+
+                return { pageType: 'article' as const, data, categoryArticles: [], totalPages: 1, articleUpperHtml, articleBottomHtml };
+            }
+
+            if (collection.slug === 'pages') {
+                return { pageType: 'page' as const, data, categoryArticles: [], totalPages: 1, articleBottomHtml: '' };
+            }
+
+            return { pageType: collection.slug as any, data, categoryArticles: [], totalPages: 1, articleBottomHtml: '' };
+        }
     }
 
-    // 2. Try Term (Taxonomy Archive)
+    // 2. Try Term (Taxonomy Archive) — use cached allTaxonomies + terms_slug_unique index
     let termResult: any[] = [];
     let taxonomyData: any = null;
 
     if (segments.length === 1 && segments[0] === 'all') {
         termResult = [{ term: { id: null, name: 'Semua Berita', slug: 'all' }, taxonomy: { allowIndexing: true } }];
     } else if (segments.length === 1) {
-        // e.g. /category-term — prefer lower taxonomy id when multiple match
-        termResult = await db.select({
-            term: terms,
-            taxonomy: taxonomies
-        })
-        .from(terms)
-        .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-        .where(
-            and(
-                eq(terms.slug, segments[0]),
-                eq(taxonomies.isRouted, true)
-            )
-        )
-        .orderBy(taxonomies.id)
-        .limit(1);
+        const matchedTerms = await db.select()
+            .from(terms)
+            .where(eq(terms.slug, segments[0]));
+        const routedMatches = matchedTerms
+            .map((term: any) => ({ term, taxonomy: taxById.get(term.taxonomyId) }))
+            .filter((m: any) => m.taxonomy && Boolean(m.taxonomy.isRouted))
+            .sort((a: any, b: any) => a.taxonomy.id - b.taxonomy.id);
+        if (routedMatches.length > 0) {
+            termResult = [routedMatches[0]];
+        }
     } else if (segments.length === 2) {
-        // e.g. /product/dining-room
-        termResult = await db.select({
-            term: terms,
-            taxonomy: taxonomies
-        })
-        .from(terms)
-        .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-        .where(
-            and(
-                eq(taxonomies.slug, segments[0]),
-                eq(terms.slug, segments[1]),
-                eq(taxonomies.isRouted, true)
-            )
-        )
-        .limit(1);
+        const matchedTax = allTaxonomies.find((t: any) => t.slug === segments[0] && Boolean(t.isRouted));
+        if (matchedTax) {
+            const matchedTerms = await db.select()
+                .from(terms)
+                .where(and(eq(terms.slug, segments[1]), eq(terms.taxonomyId, matchedTax.id)))
+                .limit(1);
+            if (matchedTerms.length > 0) {
+                termResult = [{ term: matchedTerms[0], taxonomy: matchedTax }];
+            }
+        }
     }
 
     if (termResult.length > 0) {
         const data = termResult[0].term;
         taxonomyData = termResult[0].taxonomy;
 
-        // Strict URL Enforcement: Redirect if the visited format does not match the configured setting
         if (segments.length === 1 && !taxonomyData.allowIndexing && data.slug === 'all') {
              // Let /all pass through as usual
         } else if (segments.length === 1 && !taxonomyData.omitTaxonomySlug && data.slug !== 'all') {
@@ -869,88 +866,53 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
             return { redirect: `/${data.slug}` };
         }
         
-        let totalItems = 0;
-        
-        if (data.id) {
-            totalItems = data.entryCount || 0;
-        } else {
-            totalItems = totalContentItems;
-        }
-        
-        const totalPages = Math.ceil(totalItems / pageSize);
+        const totalItems = data.id ? (data.entryCount || 0) : totalContentItems;
+        const totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
 
         let articlesResult: any[] = [];
         
         if (data.id) {
-            // Two-step query to prevent massive row scans and memory sorting
-            const idResult = await db.select({ id: entries.id })
+            // Walk covering index entry_terms_term_entry_idx (term_id, entry_id DESC)
+            // Zero table scan on entries_status_idx!
+            const candidateRows = await db.select({ id: entryTerms.entryId })
+                .from(entryTerms)
+                .where(eq(entryTerms.termId, data.id))
+                .orderBy(desc(entryTerms.entryId))
+                .limit(pageSize + 6)
+                .offset((currentPage - 1) * pageSize);
+
+            const candidateIds = candidateRows.map((r: any) => r.id);
+            
+            if (candidateIds.length > 0) {
+                const pubIdRows = await db.select({ id: entries.id })
+                    .from(entries)
+                    .where(and(inArray(entries.id, candidateIds), eq(entries.status, 'published')))
+                    .orderBy(desc(entries.id))
+                    .limit(pageSize);
+                const pageIds = pubIdRows.map((r: any) => r.id);
+                articlesResult = await fetchEntriesWithAuthorsByIds(db, pageIds);
+            }
+        } else {
+            // For /all route: two-step ID-first lookup
+            const pageIdRows = await db.select({ id: entries.id })
                 .from(entries)
-                .innerJoin(entryTerms, eq(entries.id, entryTerms.entryId))
                 .where(
                     and(
-                        eq(entryTerms.termId, data.id),
+                        inArray(entries.collectionId, contentCollectionIds),
                         eq(entries.status, 'published')
                     )
                 )
                 .orderBy(desc(entries.id))
                 .limit(pageSize)
                 .offset((currentPage - 1) * pageSize);
-
-            const entryIds = idResult.map((r: any) => r.id);
-            
-            if (entryIds.length > 0) {
-                articlesResult = await db.select({
-                    entry: entries,
-                    author: users
-                })
-                .from(entries)
-                .leftJoin(users, eq(entries.authorId, users.id))
-                .where(sql`${entries.id} IN (${sql.join(entryIds.map((id: any) => sql`${id}`), sql`, `)})`)
-                .orderBy(desc(entries.id));
-            }
-        } else {
-            // For /all route
-            articlesResult = await db.select({
-                entry: entries,
-                author: users
-            })
-            .from(entries)
-            .leftJoin(users, eq(entries.authorId, users.id))
-            .where(
-                and(
-                    inArray(entries.collectionId, contentCollectionIds),
-                    eq(entries.status, 'published')
-                )
-            )
-            .orderBy(desc(entries.id))
-            .limit(pageSize)
-            .offset((currentPage - 1) * pageSize);
+            const pageIds = pageIdRows.map((r: any) => r.id);
+            articlesResult = await fetchEntriesWithAuthorsByIds(db, pageIds);
         }
 
         const categoryArticles = [];
-        // Batch canonical URL lookup — single query instead of N
         const entryIds = articlesResult.map((r: any) => r.entry.id);
         const canonicalMap = await getCanonicalUrls(db, entryIds, allCollections);
-        
-        const categoryMap: any = {};
-        if (entryIds.length > 0) {
-            const catTermRows = await db.select({
-                entryId: entryTerms.entryId,
-                id: terms.id,
-                name: terms.name,
-                slug: terms.slug
-            })
-            .from(entryTerms)
-            .innerJoin(terms, eq(entryTerms.termId, terms.id))
-            .innerJoin(taxonomies, eq(terms.taxonomyId, taxonomies.id))
-            .where(and(
-                sql`${entryTerms.entryId} IN (${sql.join(entryIds.map((id: any) => sql`${id}`), sql`, `)})`
-            ));
-            for (const row of catTermRows) {
-                if (!categoryMap[row.entryId]) categoryMap[row.entryId] = [];
-                categoryMap[row.entryId].push(row);
-            }
-        }
+        const categoryMap = await fetchEntryCategoryMap(db, entryIds);
         
         for (const r of articlesResult) {
             const data = safeJsonParse(r.entry.data, {} as any);
@@ -979,7 +941,6 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
             });
         }
 
-        // Extend data with taxonomy context for SEO/indexing
         const archiveData = {
             ...data,
             taxonomy: taxonomyData,

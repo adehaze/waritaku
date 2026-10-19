@@ -2,10 +2,11 @@
 import Layout from '../../layouts/Layout.astro';
 import GlobalSidebar from '../../components/GlobalSidebar.astro';
 import Pagination from '../../components/Pagination.astro';
-import { users, entries, collections } from '../../db/schema';
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { users, entries } from '../../db/schema';
+import { eq, and, desc, sql, inArray } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../../lib/db';
+import { getAllCollectionsCached, resolveEntryDisplayFields } from '../../lib/queries';
 
 
 let rawSlug = Astro.params.slug;
@@ -63,12 +64,43 @@ if (env && (env as any).DB) {
             author.socialLinksParsed = {};
         }
 
-        const articlesCol = await db.select().from(collections).where(eq(collections.slug, 'articles')).limit(1);
-        const articlesColId = articlesCol.length > 0 ? articlesCol[0].id : null;
+        const allCols = await getAllCollectionsCached(db);
+        const contentCols = allCols.filter((c: any) => c.slug !== 'pages');
+        const primaryCol = contentCols.find((c: any) => c.slug === 'articles') || contentCols[0];
+        const articlesColId = primaryCol ? primaryCol.id : null;
 
         if (articlesColId) {
-            // Pagination Count
-            const countRes = await db.select({ count: sql<number>`count(*)` })
+            // Cache author entry count at the edge (1 hour TTL) to avoid scanning 4,000+ index entries on every page view
+            const countCacheKey = `https://waritaku.internal/cache/author_count_${author.id}_${articlesColId}`;
+            let totalItems: number | null = null;
+            if (typeof caches !== 'undefined') {
+                const hit = await caches.default.match(new Request(countCacheKey));
+                if (hit) {
+                    try { totalItems = Number(await hit.text()); } catch {}
+                }
+            }
+            if (totalItems === null || isNaN(totalItems)) {
+                const countRes = await db.select({ count: sql<number>`count(*)` })
+                    .from(entries)
+                    .where(
+                        and(
+                            eq(entries.authorId, author.id),
+                            eq(entries.collectionId, articlesColId),
+                            eq(entries.status, 'published')
+                        )
+                    );
+                totalItems = Number(countRes[0]?.count || 0);
+                if (typeof caches !== 'undefined') {
+                    caches.default.put(new Request(countCacheKey), new Response(String(totalItems), {
+                        headers: { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=3600' }
+                    })).catch(() => {});
+                }
+            }
+
+            totalPages = Math.max(1, Math.ceil(totalItems / pageSize));
+
+            // Step 1: Fetch IDs only using covering index entries_author_collection_status_id_idx
+            const pageIdRows = await db.select({ id: entries.id })
                 .from(entries)
                 .where(
                     and(
@@ -76,49 +108,31 @@ if (env && (env as any).DB) {
                         eq(entries.collectionId, articlesColId),
                         eq(entries.status, 'published')
                     )
-                );
-                
-            const totalItems = countRes[0]?.count || 0;
-            totalPages = Math.ceil(totalItems / pageSize);
-
-            // Fetch Entries
-            const articlesResult = await db.select({
-                entry: entries
-            })
-            .from(entries)
-            .where(
-                and(
-                    eq(entries.authorId, author.id),
-                    eq(entries.collectionId, articlesColId),
-                    eq(entries.status, 'published')
                 )
-            )
-            .orderBy(desc(entries.id))
-            .limit(pageSize)
-            .offset((currentPage - 1) * pageSize);
+                .orderBy(desc(entries.id))
+                .limit(pageSize)
+                .offset((currentPage - 1) * pageSize);
 
-            authorArticles = articlesResult.map((r: any) => {
-                const data = JSON.parse(r.entry.data || '{}');
-                const rawContent = data.content || '';
-                const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\[\/caption\]/g, '').trim();
-                const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
-                
-                // Thumbnail extraction
-                let thumb = '/placeholder.webp';
-                if (data.featuredImageUrl) {
-                    thumb = data.featuredImageUrl;
-                } else if (data.content) {
-                    const match = data.content.match(/<img[^>]+src="([^">]+)"/i);
-                    if (match) thumb = match[1];
-                }
+            const pageIds = pageIdRows.map((r: any) => r.id);
+
+            // Step 2: Fetch full rows by PK only for the current page (max 12 rows)
+            const fullRows = pageIds.length > 0
+                ? await db.select().from(entries).where(inArray(entries.id, pageIds)).orderBy(desc(entries.id))
+                : [];
+
+            authorArticles = fullRows.map((entry: any) => {
+                let data: any = {};
+                try { data = JSON.parse(entry.data || '{}'); } catch {}
+                const displayFields = resolveEntryDisplayFields(entry, data, primaryCol);
+                const thumb = displayFields.featuredImageUrl || '/placeholder.webp';
 
                 return {
-                    id: r.entry.id,
-                    slug: r.entry.slug,
-                    publishedAt: r.entry.publishedAt,
+                    id: entry.id,
+                    slug: entry.slug,
+                    publishedAt: entry.publishedAt,
                     ...data,
-                    categoryName: 'Article',
-                    excerpt,
+                    ...displayFields,
+                    categoryName: primaryCol?.label || 'Article',
                     thumb
                 };
             });

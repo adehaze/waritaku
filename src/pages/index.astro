@@ -7,7 +7,7 @@ import { entries, collections, users, taxonomies, terms, entryTerms, settings } 
 import {  desc, eq, and, sql, inArray, exists, or , ne } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
-import { getCanonicalUrl, getCanonicalUrls } from '../lib/queries';
+import { getCanonicalUrl, getCanonicalUrls, getAllCollectionsCached, getAllTaxonomiesCached, resolveEntryDisplayFields } from '../lib/queries';
 
 let layoutBlocks: any[] = [];
 let blockData: Record<string, any> = {};
@@ -21,6 +21,10 @@ let metaDescription = 'Default Homepage';
 
 if (env && (env as any).DB) {
     const db = getDb(env as any);
+    const _allCols = await getAllCollectionsCached(db);
+    const _allTaxonomies = await getAllTaxonomiesCached(db);
+    const collectionById = new Map(_allCols.map((c: any) => [c.id, c]));
+    const taxById = new Map(_allTaxonomies.map((t: any) => [t.id, t]));
     
     // 1. Find the Homepage ID
     const settingRes = await db.select().from(settings).where(eq(settings.key, 'homepage_page_id')).limit(1);
@@ -42,9 +46,9 @@ if (env && (env as any).DB) {
           let layoutBlocksData = null;
           
           if (pageRes[0].collectionId) {
-             const colRes = await db.select({ fields: collections.fields }).from(collections).where(eq(collections.id, pageRes[0].collectionId)).limit(1);
-             if (colRes.length > 0) {
-                 const fields = JSON.parse(colRes[0].fields || '[]');
+             const pageCol = collectionById.get(pageRes[0].collectionId);
+             if (pageCol) {
+                 const fields = safeJsonParse(pageCol.fields || '[]', []);
                  const blockField = fields.find((f: any) => f.type === 'blockbuilder');
                  if (blockField) {
                      isBlockBuilderPage = true;
@@ -91,8 +95,8 @@ if (env && (env as any).DB) {
         }
     }
 
-    const _allCols = await db.select({ id: collections.id, fields: collections.fields }).from(collections);
     const contentColsResult = _allCols.filter((c: any) => {
+        if (c.slug === 'pages') return false;
         const fields = safeJsonParse(c.fields || '[]', []);
         return !fields.some((f: any) => f.slug === 'isBlockBuilder' || f.slug === 'is_block_builder');
     });
@@ -165,15 +169,25 @@ if (env && (env as any).DB) {
             }
             if (targetTermIds.length === 0) return [];
 
-            // Step 2: Fetch matching entry IDs via entry_terms PK index — zero JOIN, zero scan
-            const etRows = await db.select({ entryId: entryTerms.entryId })
-                .from(entryTerms)
-                .where(inArray(entryTerms.termId, targetTermIds));
-            const candidateIds = Array.from(new Set(etRows.map((r: any) => r.entryId)));
+            // Step 2: Walk covering index entry_terms_term_entry_idx (term_id, entry_id DESC) with LIMIT!
+            const perTermLimit = offset + limit + 15;
+            let candidateIds: number[] = [];
+            if (targetTermIds.length === 1) {
+                const etRows = await db.select({ entryId: entryTerms.entryId })
+                    .from(entryTerms)
+                    .where(eq(entryTerms.termId, targetTermIds[0]))
+                    .orderBy(desc(entryTerms.entryId))
+                    .limit(perTermLimit);
+                candidateIds = etRows.map((r: any) => r.entryId);
+            } else {
+                const etRows = await db.select({ entryId: entryTerms.entryId })
+                    .from(entryTerms)
+                    .where(inArray(entryTerms.termId, targetTermIds.slice(0, 90)))
+                    .orderBy(desc(entryTerms.entryId))
+                    .limit(perTermLimit * 2);
+                candidateIds = Array.from(new Set(etRows.map((r: any) => r.entryId))).sort((a: number, b: number) => b - a);
+            }
             if (candidateIds.length === 0) return [];
-
-            // Sort descending (highest ID = newest) before chunking
-            candidateIds.sort((a: number, b: number) => b - a);
 
             // Step 3: Verify by PK only — pure id IN (chunk), forces SQLite to use PK index.
             const D1_CHUNK = 50;
@@ -190,7 +204,7 @@ if (env && (env as any).DB) {
                 confirmed = confirmed.concat(valid);
                 
                 if (confirmed.length >= offset + limit) {
-                    break; // Stop fetching chunks once we have enough to fulfill offset+limit!
+                    break;
                 }
             }
             
@@ -225,9 +239,9 @@ if (env && (env as any).DB) {
         const result = entryIds.map(id => entryMap.get(id)).filter(Boolean);
 
         // Step 5: Canonical URLs (already optimized)
-        const canonicalMap = await getCanonicalUrls(db, entryIds);
+        const canonicalMap = await getCanonicalUrls(db, entryIds, _allCols);
 
-        // Step 6: Category display names — separate PK queries, no JOIN+IN
+        // Step 6: Category display names — separate PK queries + cached taxonomies
         let filterCategoryName = '';
         let filterCategorySlug = '';
         const categoryMap: Record<number, { id: number, name: string, slug: string }[]> = {};
@@ -236,37 +250,31 @@ if (env && (env as any).DB) {
             const row = await db.select({ name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId }).from(terms).where(eq(terms.id, parseInt(filterTermId as string))).limit(1);
             if (row.length > 0) { 
                 filterCategoryName = row[0].name; 
-                const tax = await db.select({ slug: taxonomies.slug, omitTaxonomySlug: taxonomies.omitTaxonomySlug }).from(taxonomies).where(eq(taxonomies.id, row[0].taxonomyId)).limit(1);
-                filterCategorySlug = (tax.length > 0 && !tax[0].omitTaxonomySlug) ? `${tax[0].slug}/${row[0].slug}` : row[0].slug;
+                const tax = taxById.get(row[0].taxonomyId);
+                filterCategorySlug = (tax && !tax.omitTaxonomySlug) ? `${tax.slug}/${row[0].slug}` : row[0].slug;
             }
         } else if (categoryId && categoryId !== 'all') {
             const row = await db.select({ name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId }).from(terms).where(eq(terms.id, parseInt(categoryId as string))).limit(1);
             if (row.length > 0) { 
                 filterCategoryName = row[0].name; 
-                const tax = await db.select({ slug: taxonomies.slug, omitTaxonomySlug: taxonomies.omitTaxonomySlug }).from(taxonomies).where(eq(taxonomies.id, row[0].taxonomyId)).limit(1);
-                filterCategorySlug = (tax.length > 0 && !tax[0].omitTaxonomySlug) ? `${tax[0].slug}/${row[0].slug}` : row[0].slug;
+                const tax = taxById.get(row[0].taxonomyId);
+                filterCategorySlug = (tax && !tax.omitTaxonomySlug) ? `${tax.slug}/${row[0].slug}` : row[0].slug;
             }
         } else if (tagSlug) {
             filterCategoryName = tagSlug;
             filterCategorySlug = `tag/${tagSlug}`;
         } else if (!hasActiveFilter && entryIds.length > 0) {
-            // Batch fetch: entry_terms → terms → taxonomies, all PK — no JOIN+IN
             const etRows2 = await db.select().from(entryTerms).where(inArray(entryTerms.entryId, entryIds));
             const tIds = Array.from(new Set(etRows2.map((r: any) => r.termId)));
             if (tIds.length > 0) {
-                // Chunk at 90 IDs: D1 rejects more than 100 bound parameters.
                 const tRows: any[] = [];
                 for (let t = 0; t < tIds.length; t += 90) {
                     const rows = await db.select({ id: terms.id, name: terms.name, slug: terms.slug, taxonomyId: terms.taxonomyId })
                         .from(terms).where(inArray(terms.id, tIds.slice(t, t + 90)));
                     tRows.push(...rows);
                 }
-                const taxIds = Array.from(new Set(tRows.map((t: any) => t.taxonomyId)));
-                const taxRows = taxIds.length > 0
-                    ? await db.select({ id: taxonomies.id, slug: taxonomies.slug }).from(taxonomies).where(inArray(taxonomies.id, taxIds))
-                    : [];
-                const catTaxIds = new Set(taxRows.filter((t: any) => t.slug === 'categories').map((t: any) => t.id));
-                const termMap = new Map(tRows.filter((t: any) => catTaxIds.has(t.taxonomyId)).map((t: any) => [t.id, t]));
+                const catTaxIds = new Set(_allTaxonomies.filter((t: any) => t.slug === 'categories').map((t: any) => t.id));
+                const termMap = new Map(tRows.filter((t: any) => catTaxIds.size === 0 || catTaxIds.has(t.taxonomyId)).map((t: any) => [t.id, t]));
                 for (const r of etRows2) {
                     const t = termMap.get((r as any).termId);
                     if (!t) continue;
@@ -278,10 +286,9 @@ if (env && (env as any).DB) {
         }
 
         return result.map((r: any) => {
-            const data = JSON.parse(r.entry.data || '{}');
-            const rawContent = data.content || '';
-            const textOnly = rawContent.replace(/<[^>]+>/g, '').replace(/\[caption[^\]]*\]|\/caption\]/g, '').trim();
-            const excerpt = textOnly.length > 120 ? textOnly.substring(0, 120) + '...' : textOnly;
+            const data = safeJsonParse(r.entry.data, {});
+            const col = collectionById.get(r.entry.collectionId);
+            const displayFields = resolveEntryDisplayFields(r.entry, data, col);
             const prefixSlug = canonicalMap[r.entry.id];
             const canonicalUrl = prefixSlug ? `${prefixSlug}/${r.entry.slug}` : r.entry.slug;
             let cats = hasActiveFilter
@@ -301,12 +308,12 @@ if (env && (env as any).DB) {
                 canonicalUrl: `/${canonicalUrl}`,
                 publishedAt: r.entry.publishedAt,
                 ...data,
+                ...displayFields,
                 categories: cats,
                 categoryName: hasActiveFilter ? filterCategoryName : (cats.length > 0 ? cats[0].name : 'Article'),
                 categorySlug: hasActiveFilter ? filterCategorySlug : (cats.length > 0 ? cats[0].slug : 'all'),
                 authorName: r.author?.name || 'Admin',
                 authorId: r.author?.id || 1,
-                excerpt: excerpt
             };
         });
     };
@@ -333,26 +340,18 @@ if (env && (env as any).DB) {
 
             if (termRow.length > 0) {
                 archiveTitle = termRow[0].name;
-                const taxRow = await db.select({
-                    slug: taxonomies.slug,
-                    omitTaxonomySlug: taxonomies.omitTaxonomySlug
-                }).from(taxonomies).where(eq(taxonomies.id, termRow[0].taxonomyId)).limit(1);
-
-                if (taxRow.length > 0 && !taxRow[0].omitTaxonomySlug) {
-                    archiveUrl = `${taxRow[0].slug}/${termRow[0].slug}`;
+                const tax = taxById.get(termRow[0].taxonomyId);
+                if (tax && !tax.omitTaxonomySlug) {
+                    archiveUrl = `${tax.slug}/${termRow[0].slug}`;
                 } else {
                     archiveUrl = termRow[0].slug;
                 }
             }
         } else if (effectiveTaxId) {
-            const taxRow = await db.select({
-                slug: taxonomies.slug,
-                label: taxonomies.label
-            }).from(taxonomies).where(eq(taxonomies.id, parseInt(effectiveTaxId.toString()))).limit(1);
-
-            if (taxRow.length > 0) {
-                archiveTitle = taxRow[0].label;
-                archiveUrl = taxRow[0].slug;
+            const tax = taxById.get(parseInt(effectiveTaxId.toString()));
+            if (tax) {
+                archiveTitle = tax.label;
+                archiveUrl = tax.slug;
             }
         } else if (effectiveTag) {
             archiveTitle = effectiveTag;
