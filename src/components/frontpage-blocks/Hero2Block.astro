@@ -20,6 +20,8 @@ const subFeatured = articles.slice(1, 5); // 4 articles
                 alt={featured.title}
                 class="w-full h-full object-cover"
                 loading="eager"
+                fetchpriority="high"
+                decoding="async"
             />
             {/* Fade out gradient to background color */}
             <div class="absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent"></div>

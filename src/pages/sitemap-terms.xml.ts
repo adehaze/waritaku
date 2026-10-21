@@ -1,8 +1,9 @@
 import type { APIRoute } from 'astro';
-import { terms, taxonomies, settings } from '../db/schema';
-import { eq, inArray, and, sql } from 'drizzle-orm';
+import { terms, taxonomies } from '../db/schema';
+import { eq, inArray, and, gt, sql } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
+import { getGeneralSettingsCached } from '../lib/queries';
 import { serveStoredResponse } from '../lib/stored-response';
 
 const build: APIRoute = async ({ request }) => {
@@ -17,22 +18,26 @@ const build: APIRoute = async ({ request }) => {
     let siteUrl = new URL(request.url).origin;
     let sitemapTaxonomies: string[] | null = null;
     
-    const settingsRec = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-    if (settingsRec.length > 0) {
-        try {
-            const parsed = JSON.parse(settingsRec[0].value);
-            if (parsed.siteUrl) siteUrl = parsed.siteUrl;
-            if (parsed.sitemapTaxonomies !== undefined) sitemapTaxonomies = parsed.sitemapTaxonomies;
-        } catch(e) {}
-    }
+    const parsed = await getGeneralSettingsCached(db);
+    if (parsed.siteUrl) siteUrl = parsed.siteUrl;
+    if (parsed.sitemapTaxonomies !== undefined) sitemapTaxonomies = parsed.sitemapTaxonomies;
 
-    let condition: any = eq(taxonomies.isRouted, true);
+    let condition: any = and(
+        eq(taxonomies.isRouted, true),
+        eq(taxonomies.allowIndexing, true),
+        gt(terms.entryCount, 0)
+    );
 
     if (sitemapTaxonomies !== null) {
         if (sitemapTaxonomies.length === 0) {
             condition = sql`1=0`;
         } else {
-            condition = and(eq(taxonomies.isRouted, true), inArray(taxonomies.slug, sitemapTaxonomies));
+            condition = and(
+                eq(taxonomies.isRouted, true),
+                eq(taxonomies.allowIndexing, true),
+                gt(terms.entryCount, 0),
+                inArray(taxonomies.slug, sitemapTaxonomies)
+            );
         }
     }
 

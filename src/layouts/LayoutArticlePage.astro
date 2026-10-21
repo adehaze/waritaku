@@ -5,10 +5,9 @@ import DisplaySettings from '../components/DisplaySettings.astro';
 import ThemeInjector from '../components/ThemeInjector.astro';
 import LayoutGlobalHeader from '../components/LayoutGlobalHeader.astro';
 import LayoutGlobalFooter from '../components/LayoutGlobalFooter.astro';
-import { settings } from '../db/schema';
-import { eq } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
+import { getGeneralSettingsCached } from '../lib/queries';
 
 
 interface Props {
@@ -20,10 +19,14 @@ interface Props {
   noindex?: boolean | string;
   canonicalUrl?: string;
   ogImage?: string;
+  ogType?: string;
   author?: string;
+  publishedTime?: string;
+  modifiedTime?: string;
+  section?: string;
 }
 
-const { title, metaDescription, schema, headerStyle = 'default', footerStyle = 'default', noindex = false, canonicalUrl, ogImage, author } = Astro.props;
+const { title, metaDescription, schema, headerStyle = 'default', footerStyle = 'default', noindex = false, canonicalUrl, ogImage, ogType = 'website', author, publishedTime, modifiedTime, section } = Astro.props;
 
 let generalConfig = {
     siteTitle: 'Waritaku',
@@ -39,17 +42,17 @@ let generalConfig = {
 if (env && env.DB) {
     try {
         const db = getDb(env);
-        const record = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-        if (record.length > 0) {
-            generalConfig = { ...generalConfig, ...JSON.parse(record[0].value) };
-        }
+        const parsed = await getGeneralSettingsCached(db);
+        generalConfig = { ...generalConfig, ...parsed };
     } catch(e) {}
 }
 
 const displayTitle = title ? `${title} | ${generalConfig.siteTitle}` : generalConfig.siteTitle;
+const displayDesc = metaDescription || generalConfig.siteDescription;
 const finalCanonicalUrl = canonicalUrl 
     ? (canonicalUrl.startsWith('http') ? canonicalUrl : new URL(canonicalUrl, generalConfig.siteUrl).toString())
     : new URL(Astro.url.pathname, generalConfig.siteUrl).toString();
+const finalOgImage = ogImage || (generalConfig.logoUrl ? (generalConfig.logoUrl.startsWith('http') ? generalConfig.logoUrl : new URL(generalConfig.logoUrl, generalConfig.siteUrl).toString()) : undefined);
 ---
 
 <!doctype html>
@@ -60,20 +63,23 @@ const finalCanonicalUrl = canonicalUrl
 		<meta name="viewport" content="width=device-width" />
 		<meta name="generator" content={Astro.generator} />
 		<title>{displayTitle}</title>
-        {metaDescription && <meta name="description" content={metaDescription} />}
+        {displayDesc && <meta name="description" content={displayDesc.slice(0, 160)} />}
         {author && <meta name="author" content={author} />}
         <link rel="canonical" href={finalCanonicalUrl} />
         {/* Open Graph / Twitter Card */}
-        <meta property="og:type" content="website" />
+        <meta property="og:type" content={ogType} />
         <meta property="og:site_name" content={generalConfig.siteTitle} />
-        <meta property="og:title" content={displayTitle.length > 60 ? displayTitle.slice(0, 57) + '...' : displayTitle} />
+        <meta property="og:title" content={displayTitle} />
         <meta property="og:url" content={finalCanonicalUrl} />
-        <meta property="og:description" content={(metaDescription || generalConfig.siteDescription).slice(0, 200)} />
-        {ogImage && <meta property="og:image" content={ogImage} />}
+        <meta property="og:description" content={(displayDesc || generalConfig.siteDescription).slice(0, 200)} />
+        {finalOgImage && <meta property="og:image" content={finalOgImage} />}
+        {ogType === 'article' && publishedTime && <meta property="article:published_time" content={publishedTime} />}
+        {ogType === 'article' && modifiedTime && <meta property="article:modified_time" content={modifiedTime} />}
+        {ogType === 'article' && section && <meta property="article:section" content={section} />}
         <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content={displayTitle.length > 60 ? displayTitle.slice(0, 57) + '...' : displayTitle} />
-        <meta name="twitter:description" content={(metaDescription || generalConfig.siteDescription).slice(0, 200)} />
-        {ogImage && <meta name="twitter:image" content={ogImage} />}
+        <meta name="twitter:title" content={displayTitle} />
+        <meta name="twitter:description" content={(displayDesc || generalConfig.siteDescription).slice(0, 200)} />
+        {finalOgImage && <meta name="twitter:image" content={finalOgImage} />}
         {noindex && <meta name="robots" content={typeof noindex === 'string' ? noindex : "noindex, nofollow"} />}
         {schema && <script type="application/ld+json" set:html={schema} />}
         {generalConfig.headerHtml && <Fragment set:html={sanitizeHtml(generalConfig.headerHtml)} />}

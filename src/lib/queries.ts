@@ -554,7 +554,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
 
         return { 
             pageType: 'collection_archive' as const, 
-            data: { title: collection.label || collection.name || slug, metaTitle: `Archive: ${collection.label || slug}` }, 
+            data: { slug: collection.slug, canonicalUrl: `/${collection.slug}`, title: collection.label || collection.name || slug, metaTitle: `Archive: ${collection.label || slug}` }, 
             categoryArticles, 
             totalPages, 
             articleBottomHtml: '' 
@@ -768,6 +768,7 @@ export async function resolveRouteData(db: any, slug: string, currentPage: numbe
                 canonicalUrl: `/${canonicalUrl}`,
                 status: entry.status,
                 publishedAt: entry.publishedAt,
+                updatedAt: entry.updatedAt,
                 ...parsedData,
                 ...displayFields,
                 authorId: author?.id || 0,

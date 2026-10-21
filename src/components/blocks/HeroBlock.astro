@@ -11,6 +11,8 @@ const { block, data, headerImage } = Astro.props;
         src={headerImage} 
         alt={data.title || data.name}
         class="w-full h-full object-cover"
+        fetchpriority="high"
+        decoding="async"
         onerror="this.src='https://placehold.co/1920x1080/333/FFF?text=Waritaku'"
     />
     <div class="absolute inset-0 bg-gradient-to-t from-background via-background/60 to-transparent"></div>

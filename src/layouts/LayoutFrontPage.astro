@@ -5,10 +5,9 @@ import DisplaySettings from '../components/DisplaySettings.astro';
 import ThemeInjector from '../components/ThemeInjector.astro';
 import LayoutGlobalHeader from '../components/LayoutGlobalHeader.astro';
 import LayoutGlobalFooter from '../components/LayoutGlobalFooter.astro';
-import { settings } from '../db/schema';
-import { eq } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 import { getDb } from '../lib/db';
+import { getGeneralSettingsCached } from '../lib/queries';
 
 
 interface Props {
@@ -24,8 +23,10 @@ const { title, metaDescription, schema, headerStyle = 'default', footerStyle = '
 let generalConfig = {
     siteTitle: 'Waritaku',
     siteUrl: 'https://waritaku.com',
+    siteDescription: 'Membahas Pop Kultur',
     tagline: '',
     faviconUrl: '/favicon.svg',
+    logoUrl: '',
     language: 'id',
     headerHtml: '',
     footerHtml: ''
@@ -34,19 +35,21 @@ let generalConfig = {
 if (env && (env as any).DB) {
     try {
         const db = getDb(env as any);
-        const record = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-        if (record.length > 0) {
-            generalConfig = { ...generalConfig, ...JSON.parse(record[0].value) };
-        }
+        const parsed = await getGeneralSettingsCached(db);
+        generalConfig = { ...generalConfig, ...parsed };
     } catch(e) {}
 }
 
 let displayTitle = generalConfig.siteTitle;
-if (title && title !== 'Home') {
+if (title && title !== 'Home' && title !== generalConfig.siteTitle) {
     displayTitle = `${title} | ${generalConfig.siteTitle}`;
 } else if (generalConfig.tagline) {
     displayTitle = `${generalConfig.siteTitle} | ${generalConfig.tagline}`;
 }
+const displayDesc = metaDescription || generalConfig.siteDescription || generalConfig.tagline;
+const ogImg = generalConfig.logoUrl
+    ? (generalConfig.logoUrl.startsWith('http') ? generalConfig.logoUrl : new URL(generalConfig.logoUrl, generalConfig.siteUrl).toString())
+    : '';
 let cleanPath = Astro.url.pathname;
 if (cleanPath.length > 1 && cleanPath.endsWith('/')) {
     cleanPath = cleanPath.slice(0, -1);
@@ -62,8 +65,18 @@ const canonicalUrl = new URL(cleanPath, generalConfig.siteUrl).toString();
     <meta name="viewport" content="width=device-width" />
     <meta name="generator" content={Astro.generator} />
     <title>{displayTitle}</title>
-    {metaDescription && <meta name="description" content={metaDescription} />}
+    {displayDesc && <meta name="description" content={displayDesc} />}
     <link rel="canonical" href={canonicalUrl} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content={generalConfig.siteTitle} />
+    <meta property="og:title" content={displayTitle} />
+    <meta property="og:url" content={canonicalUrl} />
+    {displayDesc && <meta property="og:description" content={displayDesc.slice(0, 200)} />}
+    {ogImg && <meta property="og:image" content={ogImg} />}
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={displayTitle} />
+    {displayDesc && <meta name="twitter:description" content={displayDesc.slice(0, 200)} />}
+    {ogImg && <meta name="twitter:image" content={ogImg} />}
     {schema && <script type="application/ld+json" set:html={schema} />}
     {generalConfig.headerHtml && <Fragment set:html={sanitizeHtml(generalConfig.headerHtml)} />}
         

@@ -1,9 +1,8 @@
 import type { APIRoute } from 'astro';
-import { entries, collections, settings } from '../db/schema';
-import { eq, and, inArray } from 'drizzle-orm';
 import { env } from 'cloudflare:workers';
 
 import { getDb } from '../lib/db';
+import { getGeneralSettingsCached, getAllCollectionsCached } from '../lib/queries';
 import { serveStoredResponse, SITEMAP_PAGE_SIZE } from '../lib/stored-response';
 
 const build: APIRoute = async ({ request }) => {
@@ -21,30 +20,22 @@ const build: APIRoute = async ({ request }) => {
     let sitemapCollections: string[] | null = null;
     let sitemapTaxonomies: string[] | null = null;
     
-    const settingsRec = await db.select().from(settings).where(eq(settings.key, 'general_settings'));
-    if (settingsRec.length > 0) {
-        try {
-            const parsed = JSON.parse(settingsRec[0].value);
-            if (parsed.siteUrl) siteUrl = parsed.siteUrl;
-            if (parsed.sitemapCollections !== undefined) sitemapCollections = parsed.sitemapCollections;
-            if (parsed.sitemapTaxonomies !== undefined) sitemapTaxonomies = parsed.sitemapTaxonomies;
-        } catch(e) {}
-    }
+    const parsed = await getGeneralSettingsCached(db);
+    if (parsed.siteUrl) siteUrl = parsed.siteUrl;
+    if (parsed.sitemapCollections !== undefined) sitemapCollections = parsed.sitemapCollections;
+    if (parsed.sitemapTaxonomies !== undefined) sitemapTaxonomies = parsed.sitemapTaxonomies;
 
-    // 1. Count Total Published Entries
-    const { sql } = await import('drizzle-orm');
-    
+    // 1. Count Total Published Entries from cached collections
+    const allCols = await getAllCollectionsCached(db);
     let totalEntries = 0;
     
     if (sitemapCollections !== null && sitemapCollections.length === 0) {
         totalEntries = 0;
     } else {
-        let colQuery = db.select({ total: sql<number>`SUM(${collections.entryCount})` }).from(collections);
-        if (sitemapCollections !== null) {
-            colQuery = colQuery.where(inArray(collections.slug, sitemapCollections)) as any;
-        }
-        const res = await colQuery;
-        totalEntries = Number(res[0]?.total || 0);
+        const filteredCols = sitemapCollections !== null
+            ? allCols.filter((c: any) => sitemapCollections!.includes(c.slug))
+            : allCols;
+        totalEntries = filteredCols.reduce((sum: number, c: any) => sum + Number(c.entryCount || 0), 0);
     }
     const CHUNK_SIZE = SITEMAP_PAGE_SIZE;
     const totalEntryPages = Math.max(1, Math.ceil(totalEntries / CHUNK_SIZE));

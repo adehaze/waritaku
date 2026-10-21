@@ -30,9 +30,9 @@ function getPageUrl(page: number) {
     const queryString = searchParams.toString() ? `?${searchParams.toString()}` : '';
 
     if (page === 1) {
-        return `${rawBase}/${queryString}`;
+        return `${rawBase || '/'}${queryString}`;
     }
-    return `${rawBase}/page/${page}/${queryString}`;
+    return `${rawBase}/page/${page}${queryString}`;
 }
 
 // Generate the sequence of page numbers

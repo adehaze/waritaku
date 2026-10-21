@@ -88,7 +88,7 @@ if (env && (env as any).DB && query.trim().length >= 3) {
 
 ---
 
-<Layout title={`Search Results for "${query}"`}>
+<Layout title={query ? `Search Results for "${query}"` : 'Search'} noindex={true}>
     <div class="container mx-auto px-4 sm:px-6 lg:px-8 py-12 md:py-20">
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 md:gap-12">
             
@@ -104,7 +104,7 @@ if (env && (env as any).DB && query.trim().length >= 3) {
                 {searchResults.length > 0 ? (
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
                         {searchResults.map(article => (
-                            <a href={`/${article.slug}`} class="group flex flex-col gap-3 bg-muted/20 border border-border rounded-xl overflow-hidden hover:shadow-lg transition-all hover:-translate-y-1">
+                            <a href={article.canonicalUrl || `/${article.slug}`} class="group flex flex-col gap-3 bg-muted/20 border border-border rounded-xl overflow-hidden hover:shadow-lg transition-all hover:-translate-y-1">
                                 <div class="relative aspect-video w-full overflow-hidden">
                                     <img 
                                         src={article.featuredImageUrl || article.featuredImage || article.image || article.heroImage || article.thumbnail || getThumbnail(article.content)} 

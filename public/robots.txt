@@ -6,6 +6,7 @@ User-agent: Bravebot
 Allow: /
 Disallow: /admin
 Disallow: /api
+Disallow: /search
 
 # Soc
 User-agent: Twitterbot
@@ -25,6 +26,7 @@ User-agent: Amazonbot
 Allow: /
 Disallow: /admin
 Disallow: /api
+Disallow: /search
 
 # Training
 User-agent: CCBot
@@ -36,10 +38,8 @@ User-agent: *
 Allow: /
 Disallow: /admin
 Disallow: /api
+Disallow: /search
 Disallow: /@vite/
 Disallow: /node_modules/
 
 Sitemap: https://waritaku.com/sitemap.xml
-Sitemap: https://waritaku.com/llms.txt
-Allow: /
-

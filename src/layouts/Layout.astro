@@ -5,10 +5,9 @@ import DisplaySettings from "../components/DisplaySettings.astro";
 import ThemeInjector from "../components/ThemeInjector.astro";
 import LayoutGlobalHeader from "../components/LayoutGlobalHeader.astro";
 import LayoutGlobalFooter from "../components/LayoutGlobalFooter.astro";
-import { settings } from "../db/schema";
-import { eq } from "drizzle-orm";
 import { env } from 'cloudflare:workers';
 import { getDb } from "../lib/db";
+import { getGeneralSettingsCached } from "../lib/queries";
 
 interface Props {
 	title: string;
@@ -32,16 +31,11 @@ let generalConfig = {
 if (env && env.DB) {
 	try {
 		const db = getDb(env);
-		const record = await db
-			.select()
-			.from(settings)
-			.where(eq(settings.key, "general_settings"));
-		if (record.length > 0) {
-			generalConfig = {
-				...generalConfig,
-				...JSON.parse(record[0].value),
-			};
-		}
+		const parsed = await getGeneralSettingsCached(db);
+		generalConfig = {
+			...generalConfig,
+			...parsed,
+		};
 	} catch (e) {}
 }
 
@@ -70,12 +64,12 @@ const canonicalUrl = new URL(cleanPath, generalConfig.siteUrl).toString();
 		{/* Open Graph / Twitter Card */}
 		<meta property="og:type" content="website" />
 		<meta property="og:site_name" content={generalConfig.siteTitle} />
-		<meta property="og:title" content={displayTitle.length > 60 ? displayTitle.slice(0, 57) + '...' : displayTitle} />
+		<meta property="og:title" content={displayTitle} />
 		<meta property="og:url" content={canonicalUrl} />
 		<meta property="og:description" content={(displayDesc || generalConfig.siteDescription).slice(0, 200)} />
 		{generalConfig.logoUrl && <meta property="og:image" content={generalConfig.logoUrl} />}
 		<meta name="twitter:card" content="summary_large_image" />
-		<meta name="twitter:title" content={displayTitle.length > 60 ? displayTitle.slice(0, 57) + '...' : displayTitle} />
+		<meta name="twitter:title" content={displayTitle} />
 		<meta name="twitter:description" content={(displayDesc || generalConfig.siteDescription).slice(0, 200)} />
 		{generalConfig.logoUrl && <meta name="twitter:image" content={generalConfig.logoUrl} />}
 		{

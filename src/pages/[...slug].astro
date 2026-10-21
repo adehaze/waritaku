@@ -531,13 +531,19 @@ if (env && env.DB) {
 }
 const currentUrl = `${siteUrl}${Astro.url.pathname}`;
 
+const articleExcerpt = data.metaDescription || data.displayExcerpt || data.excerpt || data.description || undefined;
 let schemaObj: any = null;
 
 if (pageType === 'article') {
     schemaObj = {
         "@context": "https://schema.org",
         "@type": "NewsArticle",
+        "mainEntityOfPage": {
+            "@type": "WebPage",
+            "@id": currentUrl
+        },
         "headline": pageTitle,
+        ...(articleExcerpt ? { "description": articleExcerpt.slice(0, 200) } : {}),
         "image": headerImage ? [
             headerImage.startsWith('http') ? headerImage : `${siteUrl}${headerImage}`
         ] : [],
@@ -565,7 +571,7 @@ if (pageType === 'article') {
         "url": currentUrl,
         "datePublished": data.publishedAt || new Date().toISOString()
     };
-} else if (pageType === 'category') {
+} else if (pageType === 'category' || pageType === 'collection_archive' || pageType === 'taxonomy_archive') {
     schemaObj = {
         "@context": "https://schema.org",
         "@type": "CollectionPage",
@@ -591,28 +597,31 @@ if (data.supports?.breadcrumbs !== false) {
         ]
     };
     if (pageType === 'article') {
-        breadcrumbSchema.itemListElement.push({
-            "@type": "ListItem",
-            "position": 2,
-            "name": data.categoryName || "Category",
-            "item": `${siteUrl}/${data.categorySlug}`
-        });
-        breadcrumbSchema.itemListElement.push({
-            "@type": "ListItem",
-            "position": 3,
-            "name": pageTitle,
-            "item": currentUrl
-        });
+        if (data.categorySlug && data.categorySlug !== 'all') {
+            breadcrumbSchema.itemListElement.push({
+                "@type": "ListItem",
+                "position": 2,
+                "name": data.categoryName || "Category",
+                "item": `${siteUrl}/${data.categorySlug}`
+            });
+            breadcrumbSchema.itemListElement.push({
+                "@type": "ListItem",
+                "position": 3,
+                "name": pageTitle,
+                "item": currentUrl
+            });
+        } else {
+            breadcrumbSchema.itemListElement.push({
+                "@type": "ListItem",
+                "position": 2,
+                "name": pageTitle,
+                "item": currentUrl
+            });
+        }
     } else {
         breadcrumbSchema.itemListElement.push({
             "@type": "ListItem",
             "position": 2,
-            "name": pageType ? pageType.charAt(0).toUpperCase() + pageType.slice(1) : 'Page',
-            "item": `${siteUrl}/${pageType || 'page'}`
-        });
-        breadcrumbSchema.itemListElement.push({
-            "@type": "ListItem",
-            "position": 3,
             "name": pageTitle,
             "item": currentUrl
         });
@@ -677,13 +686,17 @@ Astro.response.headers.set('Cache-Control', 'public, max-age=300, s-maxage=3600'
 {isHomepageFallback ? <IndexPage /> : (
 <LayoutArticlePage 
     title={pageTitle} 
-    metaDescription={data.metaDescription} 
+    metaDescription={articleExcerpt} 
     schema={schemaString} 
     headerStyle={headerStyle} 
     footerStyle={footerStyle} 
-    canonicalUrl={data.canonicalUrl ? data.canonicalUrl : `/${data.slug}`}
-    ogImage={headerImage ? (headerImage.startsWith('http') ? headerImage : `${Astro.url.origin}${headerImage.startsWith('/') ? '' : '/'}${headerImage}`) : undefined}
+    canonicalUrl={data.canonicalUrl ? data.canonicalUrl : (data.slug ? `/${data.slug}` : Astro.url.pathname.replace(/\/page\/\d+\/?$/, ''))}
+    ogImage={headerImage ? (headerImage.startsWith('http') ? headerImage : `${siteUrl}${headerImage.startsWith('/') ? '' : '/'}${headerImage}`) : undefined}
+    ogType={pageType === 'article' ? 'article' : 'website'}
     author={data.authorName || undefined}
+    publishedTime={pageType === 'article' ? data.publishedAt : undefined}
+    modifiedTime={pageType === 'article' ? (data.updatedAt || data.publishedAt) : undefined}
+    section={pageType === 'article' ? data.categoryName : undefined}
     noindex={currentPage > 1 ? "noindex, follow" : (pageType === 'taxonomy_archive' ? (data.taxonomy?.umbrellaAllowIndexing === false || data.taxonomy?.umbrellaAllowIndexing === 0) : (data.taxonomy?.allowIndexing === false || data.taxonomy?.allowIndexing === 0))}
 >
     {(pageType === 'category' || pageType === 'collection_archive') && (

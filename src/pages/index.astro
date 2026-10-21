@@ -457,6 +457,7 @@ Astro.response.headers.set('Cache-Control', 'public, max-age=300, s-maxage=3600'
 ---
 
 <LayoutFrontPage title={metaTitle} metaDescription={metaDescription} schema={schemaString} headerStyle={headerStyle} footerStyle={footerStyle}>
+    <h1 class="sr-only">{metaTitle || 'Waritaku'}</h1>
     <BlockRenderer 
         layoutBlocks={layoutBlocks} 
         blockData={blockData} 
