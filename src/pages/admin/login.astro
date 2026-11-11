@@ -9,6 +9,8 @@ import { env } from 'cloudflare:workers';
 import { getDb } from '../../lib/db';
 
 import { createSessionCookie, hashPassword, verifyPassword } from '../../lib/auth';
+import TurnstileWidget from '../../components/TurnstileWidget.astro';
+import { verifyTurnstileToken } from '../../lib/turnstile';
 
 let error = '';
 let systemLoginHtml = '';
@@ -46,8 +48,16 @@ if (Astro.request.method === 'POST') {
     const data = await Astro.request.formData();
     const email = data.get('email') as string;
     const password = data.get('password') as string;
+    const turnstileToken = (data.get('cf-turnstile-response') as string) || '';
 
-    if (!email || !password) {
+    const turnstileSecret = (env as any)?.TURNSTILE_SECRET || process.env.TURNSTILE_SECRET;
+    const clientIp = Astro.request.headers.get('cf-connecting-ip') || Astro.clientAddress;
+    const turnstileResult = await verifyTurnstileToken(turnstileToken, turnstileSecret, clientIp);
+
+    if (!turnstileResult.success) {
+      error = turnstileResult.error || 'Security verification failed. Please try again.';
+      attempts++;
+    } else if (!email || !password) {
       error = 'Email and password are required.';
     } else if (env && (env as any).DB) {
       const db = getDb(env as any);
@@ -108,6 +118,7 @@ if (Astro.request.method === 'POST') {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
     <title>Waritaku CMS — Sign In</title>
+    <script is:inline src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
     <style>
         /* Animated gradient background */
         @keyframes gradientShift {
@@ -205,6 +216,11 @@ if (Astro.request.method === 'POST') {
                     />
                 </div>
                 
+                <!-- Cloudflare Turnstile -->
+                <div class="flex justify-center pt-2">
+                    <TurnstileWidget theme="dark" action="login" />
+                </div>
+
                 <!-- Submit -->
                 <button type="submit" class="w-full h-12 mt-6 bg-primary text-primary-foreground font-bold tracking-widest uppercase rounded-2xl shadow-lg shadow-primary/20 hover:shadow-xl hover:shadow-primary/30 hover:-translate-y-0.5 hover:bg-primary/95 active:translate-y-0 active:shadow-md transition-all duration-200 flex items-center justify-center gap-2">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" y1="12" x2="3" y2="12"/></svg>

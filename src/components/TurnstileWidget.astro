@@ -1,0 +1,27 @@
+---
+interface Props {
+  siteKey?: string;
+  theme?: 'light' | 'dark' | 'auto';
+  size?: 'normal' | 'compact' | 'flexible';
+  action?: string;
+  class?: string;
+}
+
+import { TURNSTILE_SITE_KEY } from '../lib/turnstile';
+
+const {
+  siteKey = TURNSTILE_SITE_KEY,
+  theme = 'dark',
+  size = 'normal',
+  action,
+  class: className = ''
+} = Astro.props;
+---
+
+<div
+  class={`cf-turnstile ${className}`}
+  data-sitekey={siteKey}
+  data-theme={theme}
+  data-size={size}
+  {...action ? { 'data-action': action } : {}}
+></div>
