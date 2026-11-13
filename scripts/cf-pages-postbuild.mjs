@@ -96,6 +96,30 @@ export default {
   console.log('✓ Generated dist/_routes.json for Cloudflare Edge static routing');
 }
 
+// Fix bare Node.js imports in dist/ for Cloudflare Pages Functions bundler
+// Cloudflare's internal Wrangler esbuild requires "node:crypto" instead of bare "crypto".
+function fixNodeBuiltinImports(dir) {
+  if (!fs.existsSync(dir)) return;
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      fixNodeBuiltinImports(fullPath);
+    } else if (entry.isFile() && (entry.name.endsWith('.mjs') || entry.name.endsWith('.js'))) {
+      let content = fs.readFileSync(fullPath, 'utf8');
+      const modified = content
+        .replace(/from\s*["']crypto["']/g, 'from "node:crypto"')
+        .replace(/import\s*\(\s*["']crypto["']\s*\)/g, 'import("node:crypto")')
+        .replace(/require\s*\(\s*["']crypto["']\s*\)/g, 'require("node:crypto")');
+      if (modified !== content) {
+        fs.writeFileSync(fullPath, modified, 'utf8');
+        console.log(`✓ Patched bare Node.js crypto import to node:crypto in ${fullPath}`);
+      }
+    }
+  }
+}
+fixNodeBuiltinImports('dist/server');
+
 // Remove Astro's auto-generated wrangler configs to unlock Cloudflare Dashboard bindings!
 // If Cloudflare Pages detects wrangler.json or .wrangler/deploy/config.json, it locks 
 // the Cloudflare Dashboard and forces you to use the file for bindings.

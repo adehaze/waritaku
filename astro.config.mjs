@@ -18,6 +18,9 @@ export default defineConfig({
     host: '127.0.0.1'
   },
   vite: {
+    ssr: {
+      noExternal: ['bcryptjs']
+    },
     resolve: {
       dedupe: ['react', 'react-dom'],
       alias: {
