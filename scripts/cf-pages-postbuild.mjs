@@ -127,6 +127,12 @@ fixNodeBuiltinImports('dist/server');
 const generatedWrangler = 'dist/server/wrangler.json';
 const deployConfig = '.wrangler/deploy/config.json';
 const rootWranglerDeploy = '.wrangler';
+const rootWranglerToml = 'wrangler.toml';
+
+if (fs.existsSync(rootWranglerToml)) {
+  fs.unlinkSync(rootWranglerToml);
+  console.log('✓ Deleted root wrangler.toml to unlock Dashboard bindings');
+}
 
 if (fs.existsSync(generatedWrangler)) {
   fs.unlinkSync(generatedWrangler);
